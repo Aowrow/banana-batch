@@ -9,8 +9,15 @@
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
       body {
         font-family: 'Inter', sans-serif;
+        transition: background-color 0.2s, color 0.2s;
+      }
+      body:not(.light) {
         background-color: #09090b; /* zinc-950 */
         color: #e4e4e7; /* zinc-200 */
+      }
+      body.light {
+        background-color: #f9fafb; /* gray-50 */
+        color: #111827; /* gray-900 */
       }
       /* Custom scrollbar for webkit */
       ::-webkit-scrollbar {
@@ -18,14 +25,29 @@
         height: 8px;
       }
       ::-webkit-scrollbar-track {
+        transition: background-color 0.2s;
+      }
+      body:not(.light) ::-webkit-scrollbar-track {
         background: #18181b; 
       }
-      ::-webkit-scrollbar-thumb {
-        background: #3f3f46; 
-        border-radius: 4px;
+      body.light ::-webkit-scrollbar-track {
+        background: #e5e7eb;
       }
-      ::-webkit-scrollbar-thumb:hover {
+      ::-webkit-scrollbar-thumb {
+        border-radius: 4px;
+        transition: background-color 0.2s;
+      }
+      body:not(.light) ::-webkit-scrollbar-thumb {
+        background: #3f3f46; 
+      }
+      body:not(.light) ::-webkit-scrollbar-thumb:hover {
         background: #52525b; 
+      }
+      body.light ::-webkit-scrollbar-thumb {
+        background: #9ca3af;
+      }
+      body.light ::-webkit-scrollbar-thumb:hover {
+        background: #6b7280;
       }
     </style>
   <script type="importmap">
@@ -39,8 +61,9 @@
   }
 }
 </script>
-</head>
+  </head>
   <body>
     <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
   </body>
 </html>

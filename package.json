@@ -10,9 +10,11 @@
   },
   "dependencies": {
     "@google/genai": "^1.35.0",
+    "lucide-react": "^0.562.0",
+    "openai": "^6.16.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "lucide-react": "^0.562.0"
+    "zod": "^4.3.5"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

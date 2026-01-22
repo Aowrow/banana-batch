@@ -14,11 +14,20 @@ export interface UploadedImage {
 
 export type AspectRatio = 'Auto' | '1:1' | '3:4' | '4:3' | '9:16' | '16:9';
 export type Resolution = '1K' | '2K' | '4K';
+export type Provider = 'gemini' | 'openai';
+
+export interface ProviderConfig {
+  provider: Provider;
+  apiKey: string;
+  baseUrl?: string; // For OpenAI custom endpoint
+  model?: string; // Model name
+}
 
 export interface AppSettings {
   batchSize: number; // 1 to 20
   aspectRatio: AspectRatio;
   resolution: Resolution;
+  providerConfig: ProviderConfig;
 }
 
 export interface Message {

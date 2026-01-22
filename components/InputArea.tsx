@@ -2,6 +2,13 @@ import React, { useState, useRef, KeyboardEvent, DragEvent } from 'react';
 import { SendHorizontal, Square, X } from 'lucide-react';
 import { UploadedImage } from '../types';
 import { generateUUID } from '../utils/uuid';
+import {
+  validateImageSize,
+  validateImageCount,
+  validateImageMimeType,
+  VALIDATION_LIMITS
+} from '../utils/validation';
+import { getUserErrorMessage } from '../utils/errorHandler';
 
 interface InputAreaProps {
   onSend: (text: string, images?: UploadedImage[]) => void;
@@ -18,46 +25,53 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
   const dragCounterRef = useRef(0);
 
   const processFiles = async (files: FileList) => {
-    const MAX_IMAGES = 10; // Limit number of images per request
-    const MAX_FILE_SIZE_MB = 20; // Maximum file size in MB
-    
     const fileArray = Array.from(files);
-    
-    // Check total image count
-    if (uploadedImages.length + fileArray.length > MAX_IMAGES) {
-      alert(`最多只能上传 ${MAX_IMAGES} 张图片。当前已有 ${uploadedImages.length} 张，本次只能上传 ${MAX_IMAGES - uploadedImages.length} 张。`);
+
+    // Validate image count
+    try {
+      validateImageCount(fileArray.length, uploadedImages.length);
+    } catch (error) {
+      alert(getUserErrorMessage(error));
       return;
     }
-    
-    // Filter valid image files first
+
+    // Filter and validate image files
     const validFiles: File[] = [];
     for (const file of fileArray) {
       // Check file type
       if (!file.type.startsWith('image/')) {
         continue; // Silently ignore non-image files
       }
-      
-      // Check file size
-      const fileSizeMB = file.size / (1024 * 1024);
-      if (fileSizeMB > MAX_FILE_SIZE_MB) {
-        alert(`图片 "${file.name}" 太大（${fileSizeMB.toFixed(2)}MB），最大支持 ${MAX_FILE_SIZE_MB}MB`);
+
+      // Validate MIME type
+      try {
+        validateImageMimeType(file.type);
+      } catch (error) {
+        alert(getUserErrorMessage(error));
         continue;
       }
-      
+
+      // Validate file size
+      try {
+        validateImageSize(file.size);
+      } catch (error) {
+        alert(getUserErrorMessage(error));
+        continue;
+      }
+
       // Check for duplicate images (by name and size)
       const isDuplicate = uploadedImages.some(
-        img => img.name === file.name && img.data.length === file.size
+        (img) => img.name === file.name && img.data.length === file.size
       );
       if (isDuplicate) {
-        console.warn(`Skipping duplicate image: ${file.name}`);
-        continue;
+        continue; // Skip duplicates silently
       }
-      
+
       validFiles.push(file);
     }
-    
+
     // Process files in order using Promise.all to maintain order
-    const imagePromises = validFiles.map((file: File, index: number) => {
+    const imagePromises = validFiles.map((file: File) => {
       return new Promise<UploadedImage | null>((resolve) => {
         const reader = new FileReader();
         reader.onload = (event: ProgressEvent<FileReader>) => {
@@ -81,14 +95,16 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
         reader.readAsDataURL(file);
       });
     });
-    
+
     // Wait for all images to load, maintaining order
     const loadedImages = await Promise.all(imagePromises);
-    const validImages = loadedImages.filter((img): img is UploadedImage => img !== null);
-    
-    // Add images in order
+    const validImages = loadedImages.filter(
+      (img): img is UploadedImage => img !== null
+    );
+
+    // Add images in order (immutable update)
     if (validImages.length > 0) {
-      setUploadedImages(prev => [...prev, ...validImages]);
+      setUploadedImages((prev) => [...prev, ...validImages]);
     }
   };
 
@@ -131,18 +147,14 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
   };
 
   const removeImage = (id: string) => {
-    setUploadedImages(prev => prev.filter(img => img.id !== id));
+    setUploadedImages((prev) => prev.filter((img) => img.id !== id));
   };
 
   const handleSend = () => {
-    console.log('handleSend called', { text: text.trim(), imagesCount: uploadedImages.length, disabled });
     if ((text.trim() || uploadedImages.length > 0) && !disabled) {
-      console.log('Calling onSend');
       onSend(text.trim(), uploadedImages.length > 0 ? uploadedImages : undefined);
       setText('');
       setUploadedImages([]);
-    } else {
-      console.log('Send blocked:', { hasText: !!text.trim(), hasImages: uploadedImages.length > 0, disabled });
     }
   };
 
@@ -182,27 +194,54 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
 
         {/* Image Preview */}
         {uploadedImages.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-2">
-            {uploadedImages.map((img) => (
-              <div key={img.id} className="relative group">
-                <img 
-                  src={img.data} 
-                  alt={img.name || 'Uploaded image'}
-                  className={`w-20 h-20 object-cover rounded-lg border-2 transition-colors ${
-                    isLight
-                      ? 'border-indigo-400'
-                      : 'border-indigo-500/50'
-                  }`}
-                />
-                <button
-                  onClick={() => removeImage(img.id)}
-                  className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                  title="Remove image"
-                >
-                  <X size={12} />
-                </button>
-              </div>
-            ))}
+          <div className="mb-3 flex flex-wrap gap-2.5">
+            {uploadedImages.map((img, index) => {
+              const imageNumber = index + 1;
+              const chineseNumber = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'][imageNumber - 1] || imageNumber.toString();
+              return (
+                <div key={img.id} className="relative group">
+                  <div className={`
+                    relative w-24 h-24 rounded-xl overflow-hidden border-2 transition-all duration-200
+                    ${isLight
+                      ? 'border-indigo-400/60 bg-gray-50 shadow-md hover:shadow-lg hover:border-indigo-500'
+                      : 'border-indigo-500/50 bg-zinc-900 shadow-lg hover:shadow-xl hover:border-indigo-400'
+                    }
+                    group-hover:scale-105
+                  `}>
+                    <img 
+                      src={img.data} 
+                      alt={img.name || `图${chineseNumber}`}
+                      className="w-full h-full object-cover"
+                    />
+                    {/* Image number badge */}
+                    <div className={`
+                      absolute top-1 left-1 px-1.5 py-0.5 text-xs font-bold rounded-md backdrop-blur-sm
+                      ${isLight
+                        ? 'bg-indigo-600/90 text-white'
+                        : 'bg-indigo-500/90 text-white'
+                      }
+                    `}>
+                      {imageNumber}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeImage(img.id)}
+                    className={`
+                      absolute -top-2 -right-2 w-6 h-6 rounded-full flex items-center justify-center 
+                      transition-all duration-200 z-10
+                      ${isLight
+                        ? 'bg-red-500 text-white hover:bg-red-600 shadow-lg hover:scale-110'
+                        : 'bg-red-600 text-white hover:bg-red-500 shadow-lg hover:scale-110'
+                      }
+                      opacity-0 group-hover:opacity-100
+                    `}
+                    title="移除图片"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -212,21 +251,41 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={disabled}
-            placeholder={disabled ? "Generating images... Press stop to cancel." : "描述你想要生成的图片，或拖放图片到这里..."}
-            className={`w-full border-0 rounded-2xl py-4 pl-4 pr-14 focus:ring-2 focus:ring-indigo-500/50 resize-none min-h-[60px] max-h-[120px] shadow-xl disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 ${
-              isLight
-                ? 'bg-gray-100 text-gray-900 placeholder-gray-400'
-                : 'bg-zinc-900 text-zinc-100 placeholder-zinc-600'
-            }`}
+            placeholder={
+              disabled
+                ? '正在生成图片... 点击停止按钮取消'
+                : uploadedImages.length > 0
+                ? `已添加 ${uploadedImages.length} 张图片，输入描述或直接发送...`
+                : '描述你想要生成的图片，或拖放图片到这里...'
+            }
+            className={`
+              w-full border-0 rounded-2xl py-4 pl-5 pr-16
+              focus:ring-2 focus:ring-indigo-500/50 focus:outline-none
+              resize-none min-h-[64px] max-h-[160px]
+              shadow-lg disabled:opacity-50 disabled:cursor-not-allowed
+              transition-all duration-200
+              ${
+                isLight
+                  ? 'bg-gray-50 text-gray-900 placeholder-gray-400 border border-gray-200/50 focus:border-indigo-300'
+                  : 'bg-zinc-900/90 text-zinc-100 placeholder-zinc-500 border border-zinc-800/50 focus:border-indigo-600'
+              }
+            `}
             rows={1}
-            style={{ height: '60px' }} 
+            style={{ height: '64px' }}
           />
           
           {disabled ? (
             <button
               onClick={onStop}
-              className="absolute right-2 top-2 bottom-2 aspect-square rounded-xl flex items-center justify-center transition-all bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white border border-red-500/50"
-              title="Stop Generating"
+              className={`
+                absolute right-2.5 top-2.5 bottom-2.5 aspect-square rounded-xl 
+                flex items-center justify-center transition-all duration-200
+                ${isLight
+                  ? 'bg-red-500/10 text-red-600 hover:bg-red-500 hover:text-white border border-red-500/30 hover:border-red-500 shadow-md hover:scale-105'
+                  : 'bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white border border-red-500/50 hover:border-red-500 shadow-md hover:scale-105'
+                }
+              `}
+              title="停止生成"
             >
               <Square size={18} fill="currentColor" />
             </button>
@@ -235,23 +294,34 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
               onClick={handleSend}
               disabled={!text.trim() && uploadedImages.length === 0}
               className={`
-                absolute right-2 top-2 bottom-2 aspect-square rounded-xl flex items-center justify-center transition-all
+                absolute right-2.5 top-2.5 bottom-2.5 aspect-square rounded-xl 
+                flex items-center justify-center transition-all duration-200
                 ${(!text.trim() && uploadedImages.length === 0)
                   ? (isLight 
-                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                      ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
                       : 'bg-zinc-800 text-zinc-600 cursor-not-allowed')
-                  : 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg shadow-indigo-600/20'}
+                  : (isLight
+                      ? 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg shadow-indigo-600/30 hover:shadow-xl hover:scale-105 active:scale-95'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg shadow-indigo-600/30 hover:shadow-xl hover:scale-105 active:scale-95')
+                }
               `}
+              title={uploadedImages.length > 0 ? "发送图片和描述" : "发送消息"}
             >
               <SendHorizontal size={20} />
             </button>
           )}
         </div>
       </div>
-      <div className={`max-w-4xl mx-auto mt-2 text-center text-xs transition-colors duration-200 ${
-        isLight ? 'text-gray-500' : 'text-zinc-600'
+      <div className={`max-w-4xl mx-auto mt-3 text-center text-xs transition-colors duration-200 ${
+        isLight ? 'text-gray-400' : 'text-zinc-500'
       }`}>
-        Uses <strong>Flash Image</strong> for 1K (Fast) and <strong>Pro Image</strong> for 2K/4K. Only selected images are remembered.
+        <span className="inline-flex items-center gap-1.5">
+          <span>使用 <strong className={isLight ? 'text-indigo-600' : 'text-indigo-400'}>Flash Image</strong> 生成 1K（快速）</span>
+          <span className="mx-1">•</span>
+          <span>使用 <strong className={isLight ? 'text-indigo-600' : 'text-indigo-400'}>Pro Image</strong> 生成 2K/4K</span>
+          <span className="mx-1">•</span>
+          <span>仅选中的图片会被记住</span>
+        </span>
       </div>
     </div>
   );

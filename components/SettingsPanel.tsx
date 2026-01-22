@@ -1,41 +1,198 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Layers, Monitor, Square, Key, Check, Sun, Moon, Trash2 } from 'lucide-react';
-import { AppSettings, AspectRatio, Resolution } from '../types';
+import { Layers, Monitor, Square, Key, Sun, Moon, Trash2, Download, Upload } from 'lucide-react';
+import { AppSettings, AspectRatio, Resolution, Message, ProviderConfig, Provider } from '../types';
+import ProviderConfigPanel from './ProviderConfigPanel';
 
 interface SettingsPanelProps {
   settings: AppSettings;
   updateSettings: (updates: Partial<AppSettings>) => void;
-  apiKey: string;
+  providerConfig: ProviderConfig;
+  onProviderChange: (provider: Provider) => void;
   onApiKeyChange: (key: string) => void;
+  onBaseUrlChange: (url: string) => void;
+  onModelChange: (model: string) => void;
   theme: 'light' | 'dark';
   onThemeChange: (theme: 'light' | 'dark') => void;
   onClearAll?: () => void;
   hasMessages?: boolean;
+  messages?: Message[];
+  onImportMessages?: (messages: Message[]) => void;
 }
 
-const SettingsPanel: React.FC<SettingsPanelProps> = ({ settings, updateSettings, apiKey, onApiKeyChange, theme, onThemeChange, onClearAll, hasMessages }) => {
-  const [isKeyOpen, setIsKeyOpen] = useState(false);
-  const [localKey, setLocalKey] = useState(apiKey);
+const SettingsPanel: React.FC<SettingsPanelProps> = ({
+  settings,
+  updateSettings,
+  providerConfig,
+  onProviderChange,
+  onApiKeyChange,
+  onBaseUrlChange,
+  onModelChange,
+  theme,
+  onThemeChange,
+  onClearAll,
+  hasMessages,
+  messages,
+  onImportMessages
+}) => {
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsKeyOpen(false);
+        setIsConfigOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  useEffect(() => {
-      setLocalKey(apiKey);
-  }, [apiKey]);
+  // Export data package
+  const handleExport = () => {
+    if (!messages || messages.length === 0) {
+      alert('没有对话数据可导出');
+      return;
+    }
 
-  const handleKeySave = () => {
-    onApiKeyChange(localKey);
-    setIsKeyOpen(false);
+    // Validate and prepare messages with target results (selected images)
+    const validatedMessages = messages.map(msg => {
+      // For model messages with selected images, ensure the target result is valid
+      if (msg.role === 'model' && msg.selectedImageId && msg.images) {
+        const selectedImage = msg.images.find(img => img.id === msg.selectedImageId);
+        if (!selectedImage) {
+          console.warn(`Message ${msg.id}: selectedImageId ${msg.selectedImageId} not found in images, clearing selection`);
+          return { ...msg, selectedImageId: undefined };
+        }
+        if (selectedImage.status !== 'success') {
+          console.warn(`Message ${msg.id}: selected image has status ${selectedImage.status}, clearing selection`);
+          return { ...msg, selectedImageId: undefined };
+        }
+      }
+      return msg;
+    });
+
+    // Count target results (selected images)
+    const targetResultsCount = validatedMessages.filter(msg => 
+      msg.role === 'model' && msg.selectedImageId && msg.images?.some(img => 
+        img.id === msg.selectedImageId && img.status === 'success'
+      )
+    ).length;
+
+    const exportData = {
+      version: 1,
+      timestamp: Date.now(),
+      messages: validatedMessages,
+      settings: settings,
+      metadata: {
+        totalMessages: validatedMessages.length,
+        targetResultsCount: targetResultsCount, // Number of selected target results
+        exportNote: '目标结果（选中的图像）已包含在消息的 selectedImageId 字段中'
+      },
+      // Note: API Key is NOT exported for security
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `banana-batch-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.json`;
+    link.target = '_blank'; // Ensure download works
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    // Show export summary
+    if (targetResultsCount > 0) {
+      alert(`导出成功！\n共 ${validatedMessages.length} 条消息\n包含 ${targetResultsCount} 个目标结果（选中的图像）`);
+    } else {
+      alert(`导出成功！\n共 ${validatedMessages.length} 条消息`);
+    }
+  };
+
+  // Import data package
+  const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+
+      // Validate data structure
+      if (!data.messages || !Array.isArray(data.messages)) {
+        throw new Error('无效的数据包格式：缺少消息数据');
+      }
+
+      // Validate and restore target results (selected images)
+      const restoredMessages = data.messages.map((msg: Message) => {
+        // For model messages, validate selectedImageId
+        if (msg.role === 'model' && msg.selectedImageId && msg.images) {
+          const selectedImage = msg.images.find((img: any) => img.id === msg.selectedImageId);
+          
+          if (!selectedImage) {
+            console.warn(`Message ${msg.id}: selectedImageId ${msg.selectedImageId} not found in images, clearing selection`);
+            return { ...msg, selectedImageId: undefined };
+          }
+          
+          if (selectedImage.status !== 'success') {
+            console.warn(`Message ${msg.id}: selected image has status ${selectedImage.status}, clearing selection`);
+            return { ...msg, selectedImageId: undefined };
+          }
+          
+          // Ensure image data is valid
+          if (!selectedImage.data || selectedImage.data.length === 0) {
+            console.warn(`Message ${msg.id}: selected image has no data, clearing selection`);
+            return { ...msg, selectedImageId: undefined };
+          }
+        }
+        return msg;
+      });
+
+      // Count restored target results
+      const restoredTargetResultsCount = restoredMessages.filter(msg => 
+        msg.role === 'model' && msg.selectedImageId && msg.images?.some(img => 
+          img.id === msg.selectedImageId && img.status === 'success'
+        )
+      ).length;
+
+      // Import messages
+      if (onImportMessages) {
+        const targetResultsInfo = restoredTargetResultsCount > 0 
+          ? `\n包含 ${restoredTargetResultsCount} 个目标结果（选中的图像）` 
+          : '';
+        
+        if (window.confirm(`确定要导入 ${data.messages.length} 条消息吗？当前对话将被替换。${targetResultsInfo}`)) {
+          onImportMessages(restoredMessages);
+          
+          // Import settings if available
+          if (data.settings) {
+            updateSettings(data.settings);
+          }
+          
+          // Show import summary
+          if (restoredTargetResultsCount > 0) {
+            alert(`数据包导入成功！\n共导入 ${restoredMessages.length} 条消息\n已恢复 ${restoredTargetResultsCount} 个目标结果（选中的图像）`);
+          } else {
+            alert(`数据包导入成功！\n共导入 ${restoredMessages.length} 条消息`);
+          }
+        }
+      }
+    } catch (error: any) {
+      console.error('Import failed:', error);
+      alert(`导入失败：${error.message || '未知错误'}`);
+    } finally {
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
   };
 
   const isLight = theme === 'light';
@@ -128,6 +285,43 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ settings, updateSettings,
         </button>
       </div>
 
+      {/* Export/Import Data Package */}
+      {hasMessages && (
+        <div className={`flex items-center space-x-1 border-r pr-4 ${
+          isLight ? 'border-gray-300' : 'border-zinc-700'
+        }`}>
+          <button 
+            onClick={handleExport}
+            className={`p-1.5 rounded transition-colors ${
+              isLight
+                ? 'text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50'
+                : 'text-indigo-400 hover:text-indigo-300 hover:bg-indigo-900/20'
+            }`}
+            title="导出数据包"
+          >
+            <Download size={16} />
+          </button>
+          <button 
+            onClick={handleImportClick}
+            className={`p-1.5 rounded transition-colors ${
+              isLight
+                ? 'text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50'
+                : 'text-indigo-400 hover:text-indigo-300 hover:bg-indigo-900/20'
+            }`}
+            title="导入数据包"
+          >
+            <Upload size={16} />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleImport}
+            className="hidden"
+          />
+        </div>
+      )}
+
       {/* Clear All Messages */}
       {onClearAll && hasMessages && (
         <div className={`flex items-center border-r pr-4 ${
@@ -151,58 +345,38 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ settings, updateSettings,
         </div>
       )}
 
-      {/* API Key Toggle */}
+      {/* Provider Config Toggle */}
       <div className="relative" ref={dropdownRef}>
-         <button 
-           onClick={() => setIsKeyOpen(!isKeyOpen)}
-           className={`p-1.5 rounded transition-colors ${
-             apiKey 
-               ? 'text-green-500 hover:text-green-400' 
-               : isLight 
-                 ? 'text-gray-500 hover:text-gray-700' 
-                 : 'text-zinc-400 hover:text-zinc-200'
-           }`}
-           title="Configure API Key"
-         >
-            <Key size={16} />
-         </button>
+        <button
+          onClick={() => setIsConfigOpen(!isConfigOpen)}
+          className={`p-1.5 rounded transition-colors ${
+            providerConfig.apiKey
+              ? 'text-green-500 hover:text-green-400'
+              : isLight
+              ? 'text-gray-500 hover:text-gray-700'
+              : 'text-zinc-400 hover:text-zinc-200'
+          }`}
+          title="Configure Provider & API"
+        >
+          <Key size={16} />
+        </button>
 
-         {isKeyOpen && (
-            <div className={`absolute top-full right-0 mt-3 w-72 border rounded-xl shadow-2xl p-4 z-50 animate-in slide-in-from-top-2 duration-200 ${
-              isLight
-                ? 'bg-white border-gray-300'
-                : 'bg-zinc-950 border-zinc-800'
-            }`}>
-                <div className={`text-xs font-medium mb-2 ${
-                  isLight ? 'text-gray-600' : 'text-zinc-400'
-                }`}>Gemini API Key</div>
-                <div className="flex space-x-2">
-                    <input 
-                       type="password"
-                       value={localKey}
-                       onChange={(e) => setLocalKey(e.target.value)}
-                       placeholder="Enter API Key..."
-                       className={`flex-1 border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500 ${
-                         isLight
-                           ? 'bg-gray-50 border-gray-300 text-gray-900'
-                           : 'bg-zinc-900 border-zinc-800 text-zinc-200'
-                       }`}
-                    />
-                    <button 
-                       onClick={handleKeySave}
-                       className="bg-indigo-600 hover:bg-indigo-500 text-white p-1.5 rounded"
-                    >
-                       <Check size={16} />
-                    </button>
-                </div>
-                <p className={`text-[10px] mt-2 leading-tight ${
-                  isLight ? 'text-gray-500' : 'text-zinc-600'
-                }`}>
-                    Key is stored locally in your browser. <br/>
-                    Leave empty to use system default.
-                </p>
-            </div>
-         )}
+        {isConfigOpen && (
+          <div
+            className={`absolute top-full right-0 mt-3 w-96 border rounded-xl shadow-2xl z-50 animate-in slide-in-from-top-2 duration-200 ${
+              isLight ? 'bg-white border-gray-300' : 'bg-zinc-950 border-zinc-800'
+            }`}
+          >
+            <ProviderConfigPanel
+              config={providerConfig}
+              onProviderChange={onProviderChange}
+              onApiKeyChange={onApiKeyChange}
+              onBaseUrlChange={onBaseUrlChange}
+              onModelChange={onModelChange}
+              theme={theme}
+            />
+          </div>
+        )}
       </div>
 
     </div>

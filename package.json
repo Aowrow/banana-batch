@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:gh-pages": "VITE_BASE_PATH=/banana-batch/ vite build",
+    "build:server": "VITE_BASE_PATH=/ vite build",
     "preview": "vite preview"
   },
   "dependencies": {

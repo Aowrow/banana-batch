@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Check, Server, Cpu, Eye, EyeOff } from 'lucide-react';
 import { ProviderConfig, Provider } from '../types';
+import PerformanceHint from './PerformanceHint';
 
 interface ProviderConfigPanelProps {
   config: ProviderConfig;
@@ -9,6 +10,7 @@ interface ProviderConfigPanelProps {
   onBaseUrlChange: (url: string) => void;
   onModelChange: (model: string) => void;
   theme: 'light' | 'dark';
+  batchSize?: number;
 }
 
 // Predefined Gemini models
@@ -30,7 +32,8 @@ const ProviderConfigPanel: React.FC<ProviderConfigPanelProps> = ({
   onApiKeyChange,
   onBaseUrlChange,
   onModelChange,
-  theme
+  theme,
+  batchSize = 2
 }) => {
   const isLight = theme === 'light';
   const [localApiKey, setLocalApiKey] = useState(config.apiKey);
@@ -470,6 +473,13 @@ const ProviderConfigPanel: React.FC<ProviderConfigPanelProps> = ({
           )}
         </ul>
       </div>
+
+      {/* Performance Hint */}
+      <PerformanceHint
+        theme={theme}
+        batchSize={batchSize}
+        provider={config.provider}
+      />
     </div>
   );
 };

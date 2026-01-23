@@ -1,5 +1,5 @@
 import React, { useState, useRef, KeyboardEvent, DragEvent } from 'react';
-import { SendHorizontal, Square, X } from 'lucide-react';
+import { SendHorizontal, Square, X, Loader2 } from 'lucide-react';
 import { UploadedImage } from '../types';
 import { generateUUID } from '../utils/uuid';
 import {
@@ -9,6 +9,7 @@ import {
   VALIDATION_LIMITS
 } from '../utils/validation';
 import { getUserErrorMessage } from '../utils/errorHandler';
+import { optimizeImage, shouldOptimizeImage } from '../utils/imageOptimizer';
 
 interface InputAreaProps {
   onSend: (text: string, images?: UploadedImage[]) => void;
@@ -22,6 +23,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
   const [text, setText] = useState('');
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isProcessingImages, setIsProcessingImages] = useState(false);
   const dragCounterRef = useRef(0);
 
   const processFiles = async (files: FileList) => {
@@ -51,7 +53,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
         continue;
       }
 
-      // Validate file size
+      // Validate file size (before optimization)
       try {
         validateImageSize(file.size);
       } catch (error) {
@@ -59,10 +61,8 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
         continue;
       }
 
-      // Check for duplicate images (by name and size)
-      const isDuplicate = uploadedImages.some(
-        (img) => img.name === file.name && img.data.length === file.size
-      );
+      // Check for duplicate images (by name)
+      const isDuplicate = uploadedImages.some((img) => img.name === file.name);
       if (isDuplicate) {
         continue; // Skip duplicates silently
       }
@@ -70,41 +70,81 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
       validFiles.push(file);
     }
 
-    // Process files in order using Promise.all to maintain order
-    const imagePromises = validFiles.map((file: File) => {
-      return new Promise<UploadedImage | null>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (event: ProgressEvent<FileReader>) => {
-          const dataUrl = event.target?.result as string;
-          if (dataUrl) {
+    if (validFiles.length === 0) {
+      return;
+    }
+
+    // Show processing indicator
+    setIsProcessingImages(true);
+
+    try {
+      // Process files with optimization
+      const imagePromises = validFiles.map(async (file: File) => {
+        try {
+          // Optimize image if needed
+          const needsOptimization = shouldOptimizeImage(file);
+
+          if (needsOptimization) {
+            const optimizationResult = await optimizeImage(file);
+
+            // Show optimization info in dev mode
+            if (import.meta.env.DEV) {
+              const originalMB = (optimizationResult.originalSize / (1024 * 1024)).toFixed(2);
+              const optimizedMB = (optimizationResult.optimizedSize / (1024 * 1024)).toFixed(2);
+              const saved = ((1 - optimizationResult.optimizedSize / optimizationResult.originalSize) * 100).toFixed(1);
+              console.log(`Optimized ${file.name}: ${originalMB}MB → ${optimizedMB}MB (${saved}% smaller)`);
+            }
+
             const uploadedImage: UploadedImage = {
               id: generateUUID(),
-              data: dataUrl,
-              mimeType: file.type,
+              data: optimizationResult.data,
+              mimeType: optimizationResult.mimeType,
               name: file.name
             };
-            resolve(uploadedImage);
+            return uploadedImage;
           } else {
-            resolve(null);
+            // No optimization needed, read file directly
+            return new Promise<UploadedImage | null>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = (event: ProgressEvent<FileReader>) => {
+                const dataUrl = event.target?.result as string;
+                if (dataUrl) {
+                  const uploadedImage: UploadedImage = {
+                    id: generateUUID(),
+                    data: dataUrl,
+                    mimeType: file.type,
+                    name: file.name
+                  };
+                  resolve(uploadedImage);
+                } else {
+                  resolve(null);
+                }
+              };
+              reader.onerror = () => {
+                alert(`读取图片 "${file.name}" 失败，请重试`);
+                resolve(null);
+              };
+              reader.readAsDataURL(file);
+            });
           }
-        };
-        reader.onerror = () => {
-          alert(`读取图片 "${file.name}" 失败，请重试`);
-          resolve(null);
-        };
-        reader.readAsDataURL(file);
+        } catch (error) {
+          alert(`处理图片 "${file.name}" 失败: ${getUserErrorMessage(error)}`);
+          return null;
+        }
       });
-    });
 
-    // Wait for all images to load, maintaining order
-    const loadedImages = await Promise.all(imagePromises);
-    const validImages = loadedImages.filter(
-      (img): img is UploadedImage => img !== null
-    );
+      // Wait for all images to be processed
+      const loadedImages = await Promise.all(imagePromises);
+      const validImages = loadedImages.filter(
+        (img): img is UploadedImage => img !== null
+      );
 
-    // Add images in order (immutable update)
-    if (validImages.length > 0) {
-      setUploadedImages((prev) => [...prev, ...validImages]);
+      // Add images in order (immutable update)
+      if (validImages.length > 0) {
+        setUploadedImages((prev) => [...prev, ...validImages]);
+      }
+    } finally {
+      setIsProcessingImages(false);
     }
   };
 
@@ -112,7 +152,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
     e.preventDefault();
     e.stopPropagation();
     dragCounterRef.current++;
-    if (!disabled && dragCounterRef.current === 1) {
+    if (!disabled && !isProcessingImages && dragCounterRef.current === 1) {
       setIsDragging(true);
     }
   };
@@ -138,7 +178,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
     dragCounterRef.current = 0;
     setIsDragging(false);
 
-    if (disabled) return;
+    if (disabled || isProcessingImages) return;
 
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
@@ -151,7 +191,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
   };
 
   const handleSend = () => {
-    if ((text.trim() || uploadedImages.length > 0) && !disabled) {
+    if ((text.trim() || uploadedImages.length > 0) && !disabled && !isProcessingImages) {
       onSend(text.trim(), uploadedImages.length > 0 ? uploadedImages : undefined);
       setText('');
       setUploadedImages([]);
@@ -189,6 +229,16 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
               <p className="text-lg font-semibold">拖放图片到这里</p>
               <p className="text-sm mt-1">图片将添加到消息中</p>
             </div>
+          </div>
+        )}
+
+        {/* Processing Indicator */}
+        {isProcessingImages && (
+          <div className={`mb-3 flex items-center space-x-2 px-3 py-2 rounded-lg ${
+            isLight ? 'bg-indigo-50 text-indigo-700' : 'bg-indigo-900/30 text-indigo-300'
+          }`}>
+            <Loader2 size={16} className="animate-spin" />
+            <span className="text-sm font-medium">正在优化图片，请稍候...</span>
           </div>
         )}
 
@@ -254,6 +304,8 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
             placeholder={
               disabled
                 ? '正在生成图片... 点击停止按钮取消'
+                : isProcessingImages
+                ? '正在处理图片...'
                 : uploadedImages.length > 0
                 ? `已添加 ${uploadedImages.length} 张图片，输入描述或直接发送...`
                 : '描述你想要生成的图片，或拖放图片到这里...'
@@ -292,22 +344,28 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme }
           ) : (
             <button
               onClick={handleSend}
-              disabled={!text.trim() && uploadedImages.length === 0}
+              disabled={(!text.trim() && uploadedImages.length === 0) || isProcessingImages}
               className={`
-                absolute right-2.5 top-2.5 bottom-2.5 aspect-square rounded-xl 
+                absolute right-2.5 top-2.5 bottom-2.5 aspect-square rounded-xl
                 flex items-center justify-center transition-all duration-200
-                ${(!text.trim() && uploadedImages.length === 0)
-                  ? (isLight 
-                      ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
+                ${((!text.trim() && uploadedImages.length === 0) || isProcessingImages)
+                  ? (isLight
+                      ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                       : 'bg-zinc-800 text-zinc-600 cursor-not-allowed')
                   : (isLight
                       ? 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg shadow-indigo-600/30 hover:shadow-xl hover:scale-105 active:scale-95'
                       : 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg shadow-indigo-600/30 hover:shadow-xl hover:scale-105 active:scale-95')
                 }
               `}
-              title={uploadedImages.length > 0 ? "发送图片和描述" : "发送消息"}
+              title={
+                isProcessingImages
+                  ? "正在处理图片..."
+                  : uploadedImages.length > 0
+                    ? "发送图片和描述"
+                    : "发送消息"
+              }
             >
-              <SendHorizontal size={20} />
+              {isProcessingImages ? <Loader2 size={20} className="animate-spin" /> : <SendHorizontal size={20} />}
             </button>
           )}
         </div>

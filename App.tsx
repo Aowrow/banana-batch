@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { Banana } from 'lucide-react';
 import { Message, UploadedImage } from './types';
 import { generateUUID } from './utils/uuid';
 import { getUserErrorMessage } from './utils/errorHandler';
 import { useMessageState } from './hooks/useMessageState';
+import { useSessionState } from './hooks/useSessionState';
 import { useImageGeneration } from './hooks/useImageGeneration';
 import { useSettings } from './hooks/useSettings';
 import { useProviderConfig } from './hooks/useProviderConfig';
@@ -11,10 +12,24 @@ import { useTheme } from './hooks/useTheme';
 import MessageList from './components/MessageList';
 import InputArea from './components/InputArea';
 import SettingsPanel from './components/SettingsPanel';
+import SessionList from './components/SessionList';
 import ErrorBoundary from './components/ErrorBoundary';
 
 const App: React.FC = () => {
-  // Custom hooks
+  // Session management
+  const {
+    sessions,
+    currentSessionId,
+    getCurrentSession,
+    createSession,
+    switchSession,
+    deleteSession,
+    updateSessionTitle,
+    updateSessionMessages,
+    clearCurrentSession
+  } = useSessionState();
+
+  // Message state (for current session)
   const {
     messages,
     getLatestMessages,
@@ -44,6 +59,38 @@ const App: React.FC = () => {
   });
 
   const { theme, setTheme } = useTheme();
+
+  // Track the last loaded session to avoid saving when loading
+  const lastLoadedSessionRef = useRef<string | null>(null);
+  const isInitialLoadRef = useRef(true);
+
+  // Load messages when switching sessions
+  useEffect(() => {
+    const currentSession = getCurrentSession();
+    if (currentSession) {
+      lastLoadedSessionRef.current = currentSessionId;
+      replaceAllMessages(currentSession.messages);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSessionId]); // Only depend on sessionId change
+
+  // Save messages to current session whenever they change
+  useEffect(() => {
+    // Skip initial load
+    if (isInitialLoadRef.current) {
+      isInitialLoadRef.current = false;
+      return;
+    }
+
+    // Skip if we just loaded this session (avoid saving right after loading)
+    if (lastLoadedSessionRef.current === currentSessionId) {
+      lastLoadedSessionRef.current = null;
+      return;
+    }
+
+    // Save messages to current session
+    updateSessionMessages(currentSessionId, messages);
+  }, [messages, currentSessionId, updateSessionMessages]);
 
   // Sync provider config to settings when it changes
   useEffect(() => {
@@ -177,13 +224,14 @@ const App: React.FC = () => {
     [deleteMessagesFrom]
   );
 
-  // Handle clear all
+  // Handle clear current session
   const handleClearAll = useCallback(() => {
     if (isGenerating) {
       stopGeneration();
     }
     clearAllMessages();
-  }, [isGenerating, stopGeneration, clearAllMessages]);
+    clearCurrentSession();
+  }, [isGenerating, stopGeneration, clearAllMessages, clearCurrentSession]);
 
   // Handle API key change
   const handleApiKeyChange = useCallback(
@@ -257,31 +305,45 @@ const App: React.FC = () => {
           />
         </header>
 
-        {/* Main Chat */}
-        <main className="flex-1 flex flex-col min-h-0 relative">
-          <MessageList
-            messages={messages}
-            isGenerating={isGenerating}
-            progress={progress}
-            onSelectImage={handleSelectImage}
-            onRetry={handleRetry}
-            onDeleteMessage={handleDeleteMessages}
+        {/* Main Content */}
+        <main className="flex-1 flex min-h-0 relative">
+          {/* Session List Sidebar */}
+          <SessionList
+            sessions={sessions}
+            currentSessionId={currentSessionId}
+            onCreateSession={createSession}
+            onSwitchSession={switchSession}
+            onDeleteSession={deleteSession}
+            onUpdateTitle={updateSessionTitle}
             theme={theme}
-            currentGeneratingMessageId={
-              isGenerating && messages.length > 0
-                ? messages[messages.length - 1].id
-                : undefined
-            }
           />
 
-          {/* Input Area (Sticky) */}
-          <div className="flex-none z-40">
-            <InputArea
-              onSend={handleSend}
-              onStop={stopGeneration}
-              disabled={isGenerating}
+          {/* Chat Area */}
+          <div className="flex-1 flex flex-col min-h-0">
+            <MessageList
+              messages={messages}
+              isGenerating={isGenerating}
+              progress={progress}
+              onSelectImage={handleSelectImage}
+              onRetry={handleRetry}
+              onDeleteMessage={handleDeleteMessages}
               theme={theme}
+              currentGeneratingMessageId={
+                isGenerating && messages.length > 0
+                  ? messages[messages.length - 1].id
+                  : undefined
+              }
             />
+
+            {/* Input Area (Sticky) */}
+            <div className="flex-none z-40">
+              <InputArea
+                onSend={handleSend}
+                onStop={stopGeneration}
+                disabled={isGenerating}
+                theme={theme}
+              />
+            </div>
           </div>
         </main>
       </div>

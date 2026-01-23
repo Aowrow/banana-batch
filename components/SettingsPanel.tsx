@@ -374,6 +374,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
               onBaseUrlChange={onBaseUrlChange}
               onModelChange={onModelChange}
               theme={theme}
+              batchSize={settings.batchSize}
             />
           </div>
         )}

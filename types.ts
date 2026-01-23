@@ -41,9 +41,17 @@ export interface Message {
   generationSettings?: {
     aspectRatio: AspectRatio;
   };
-  // The index of the image the user selected to keep for context. 
+  // The index of the image the user selected to keep for context.
   // If undefined, no image from this batch is used in future context.
-  selectedImageId?: string; 
+  selectedImageId?: string;
   timestamp: number;
   isError?: boolean;
+}
+
+export interface Session {
+  id: string;
+  title: string;
+  messages: Message[];
+  createdAt: number;
+  updatedAt: number;
 }

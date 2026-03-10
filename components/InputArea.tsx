@@ -32,6 +32,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const MIN_TEXTAREA_HEIGHT = 64;
   const MAX_TEXTAREA_HEIGHT = 160;
+  const INTERNAL_IMAGE_DRAG_TYPE = 'application/x-banana-uploaded-image';
 
   const adjustTextareaHeight = useCallback(() => {
     const textarea = textareaRef.current;
@@ -54,6 +55,8 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   }, [text, adjustTextareaHeight]);
 
   const isFileDragEvent = (e: DragEvent<HTMLElement>) => e.dataTransfer.types.includes('Files');
+  const isInternalImageSortDragEvent = (e: DragEvent<HTMLElement>) =>
+    e.dataTransfer.types.includes(INTERNAL_IMAGE_DRAG_TYPE);
 
   const reorderUploadedImages = useCallback(
     (sourceImageId: string, targetImageId: string, position: 'before' | 'after') => {
@@ -200,7 +203,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   };
 
   const handleDragEnter = (e: DragEvent<HTMLDivElement>) => {
-    if (!isFileDragEvent(e)) {
+    if (!isFileDragEvent(e) || draggingImageId || isInternalImageSortDragEvent(e)) {
       return;
     }
 
@@ -213,7 +216,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   };
 
   const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
-    if (!isFileDragEvent(e)) {
+    if (!isFileDragEvent(e) || draggingImageId || isInternalImageSortDragEvent(e)) {
       return;
     }
 
@@ -227,7 +230,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   };
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
-    if (!isFileDragEvent(e)) {
+    if (!isFileDragEvent(e) || draggingImageId || isInternalImageSortDragEvent(e)) {
       return;
     }
 
@@ -236,7 +239,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   };
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
-    if (!isFileDragEvent(e)) {
+    if (!isFileDragEvent(e) || draggingImageId || isInternalImageSortDragEvent(e)) {
       return;
     }
 
@@ -277,6 +280,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
 
     setDraggingImageId(imageId);
     e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(INTERNAL_IMAGE_DRAG_TYPE, imageId);
     e.dataTransfer.setData('text/plain', imageId);
   };
 
@@ -318,6 +322,10 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
       return;
     }
 
+    if (e.target !== e.currentTarget) {
+      return;
+    }
+
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
@@ -326,6 +334,10 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
 
   const handlePreviewDrop = (e: DragEvent<HTMLDivElement>) => {
     if (!draggingImageId) {
+      return;
+    }
+
+    if (e.target !== e.currentTarget) {
       return;
     }
 

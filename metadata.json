@@ -1,0 +1,5 @@
+{
+  "name": "Banana Batch Gen",
+  "description": "A high-efficiency image generation tool using NanoBanana. Supports concurrent generation and selective context management.",
+  "requestFramePermissions": []
+}

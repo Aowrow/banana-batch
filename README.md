@@ -19,7 +19,7 @@
 
 ## 📖 简介
 
-Banana Batch 是一个强大的 AI 图片生成工具，支持 **Google Gemini** 和 **OpenAI** 兼容接口。提供文字生成图片、图片参考生成、批量并发生成等功能，让 AI 创作更高效！
+Banana Batch 是一个强大的 AI 图片生成工具，支持 **Google Gemini**、**OpenAI GPT Image 2** 和其他 **OpenAI** 兼容接口。提供文字生成图片、图片参考生成、批量并发生成等功能，让 AI 创作更高效！
 
 ## ✨ 核心特性
 
@@ -45,7 +45,7 @@ Banana Batch 是一个强大的 AI 图片生成工具，支持 **Google Gemini**
 - **多轮对话创作**：选择喜欢的图片继续对话完善
 
 ### 🔧 灵活配置
-- **双提供商支持**：Gemini / OpenAI Compatible
+- **多提供商支持**：Gemini / OpenAI / 云雾 NanoBanana
 - **自定义模型**：支持任何兼容模型
 - **自定义端点**：配置 Base URL 使用代理
 - **多种分辨率**：1K / 2K / 4K 可选
@@ -63,9 +63,10 @@ Banana Batch 是一个强大的 AI 图片生成工具，支持 **Google Gemini**
 
 - **Node.js** 18+
 - **npm** / **yarn** / **pnpm**
-- **API Key**（二选一）：
+- **API Key**（任选其一）：
   - [Gemini API Key](https://ai.google.dev/) - Google AI Studio
   - [OpenAI API Key](https://platform.openai.com/) - OpenAI Platform
+  - 云雾 API Key - NanoBanana 模型
 
 ### 💻 本地运行
 
@@ -188,6 +189,20 @@ npm run build:server
 
 ### OpenAI Compatible 配置
 
+**使用 OpenAI 官方 GPT Image 2：**
+```
+Base URL: https://api.openai.com/v1
+Model: gpt-image-2
+API Key: 你的 OpenAI API Key
+```
+
+**使用云雾 NanoBanana：**
+```
+Base URL: 你的云雾 API 端点
+Model: nanobanana
+API Key: 你的云雾 API Key
+```
+
 **使用 Google AI OpenAI Endpoint：**
 ```
 Base URL: https://generativelanguage.googleapis.com/v1beta/openai/
@@ -213,9 +228,11 @@ API Key: 你的 OpenAI API Key
 
 | 提供商 | 模型 | 特点 |
 |--------|------|------|
+| OpenAI | `gpt-image-2` | OpenAI 官方最新图像模型 |
+| 云雾 | `nanobanana` | NanoBanana 模型，高性价比 |
 | Gemini | `gemini-3-pro-image-preview` | 高质量，推荐 |
 | Gemini | `gemini-2.5-flash-image` | 速度快 |
-| OpenAI | `gpt-4o` | 官方模型 |
+| OpenAI | `gpt-4o` | 官方多模态模型 |
 
 ### 分辨率
 

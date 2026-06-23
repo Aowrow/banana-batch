@@ -35,7 +35,7 @@ export async function runImageGeneration(request: GenerationRequest): Promise<vo
     await generateImageBatchStreamOpenAI(
       providerConfig.apiKey,
       providerConfig.baseUrl || 'https://api.openai.com/v1',
-      providerConfig.model || 'gpt-image-1',
+      providerConfig.model || 'gpt-image-2',
       request.prompt,
       history,
       settings,

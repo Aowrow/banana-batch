@@ -21,7 +21,9 @@ const GEMINI_MODELS = [
 
 // Predefined OpenAI compatible models
 const OPENAI_MODELS = [
+  { value: 'gpt-image-2', label: 'GPT Image 2 (OpenAI 官方)' },
   { value: 'gpt-image-1', label: 'GPT Image 1' },
+  { value: 'nanobanana', label: 'NanoBanana (云雾)' },
   { value: 'gemini-3-pro-image-preview', label: 'Gemini 3 Pro Image (推荐)' },
   { value: 'gemini-3.1-flash-image-preview', label: 'Gemini 3.1 Flash Image (快速)' },
   { value: 'gpt-4o', label: 'GPT-4o' }
@@ -365,7 +367,7 @@ const ProviderConfigPanel: React.FC<ProviderConfigPanelProps> = ({
               <button
                 onClick={() => {
                   setIsCustomModel(false);
-                  setLocalModel('gemini-3-pro-image-preview');
+                  setLocalModel('gpt-image-2');
                 }}
                 className={`text-xs ${
                   isLight
@@ -471,7 +473,7 @@ const ProviderConfigPanel: React.FC<ProviderConfigPanelProps> = ({
           ) : (
             <>
               <li>支持 OpenAI 和任何兼容接口</li>
-              <li>支持预设模型 (Gemini, GPT-4o) 或自定义模型</li>
+              <li>支持预设模型 (GPT Image 2, NanoBanana, Gemini) 或自定义模型</li>
               <li>可自定义 Base URL</li>
               <li>
                 Google AI 端点: https://generativelanguage.googleapis.com/v1beta/openai/

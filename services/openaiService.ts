@@ -46,6 +46,21 @@ function shouldUseGeminiCompat(baseUrl: string): boolean {
   return false;
 }
 
+function shouldUseChatCompletionsAPI(model: string): boolean {
+  const normalized = model.toLowerCase();
+  // nanobanana and Gemini models use Chat Completions API
+  if (normalized.includes('nanobanana')) return true;
+  if (normalized.includes('gemini')) return true;
+  return false;
+}
+
+function shouldUseImagesAPI(model: string): boolean {
+  const normalized = model.toLowerCase();
+  // gpt-image-2 uses Images API
+  if (normalized.includes('gpt-image-2')) return true;
+  return false;
+}
+
 function hasReferenceImages(
   history: Message[],
   uploadedImages: UploadedImage[] | undefined
@@ -181,21 +196,54 @@ export async function generateImageBatchStreamOpenAI(
     validatePrompt(prompt);
   }
 
+  // Normalize base URL based on model
+  let normalizedBaseUrl = baseUrl;
+  const normalizedModel = model.toLowerCase();
+
+  // For gpt-image-2, ensure base URL ends with /v1 (uses Images API)
+  if (normalizedModel.includes('gpt-image-2')) {
+    normalizedBaseUrl = baseUrl.replace(/\/$/, ''); // Remove trailing slash
+    if (!normalizedBaseUrl.endsWith('/v1')) {
+      normalizedBaseUrl = normalizedBaseUrl + '/v1';
+    }
+  }
+
+  console.log('[OpenAI Service] Configuration:', {
+    originalBaseUrl: baseUrl,
+    normalizedBaseUrl,
+    model,
+    batchSize: settings.batchSize,
+    aspectRatio: settings.aspectRatio,
+    resolution: settings.resolution
+  });
+
   // Initialize OpenAI client with custom baseURL
   const openai = new OpenAI({
     apiKey,
-    baseURL: baseUrl,
+    baseURL: normalizedBaseUrl,
     dangerouslyAllowBrowser: true // Required for browser usage
   });
 
   const useGeminiCompat = shouldUseGeminiCompat(baseUrl);
-  if (!useGeminiCompat) {
+  const useChatCompletions = shouldUseChatCompletionsAPI(model);
+  const useImagesAPI = shouldUseImagesAPI(model);
+
+  // Route 1: Standard OpenAI Images API (for gpt-image-2, dall-e-3, etc.)
+  if (useImagesAPI || (!useGeminiCompat && !useChatCompletions)) {
     // Standard OpenAI Image API flow
     if (!prompt || prompt.trim().length === 0) {
       throw new ImageProcessingError('Prompt is required for OpenAI image generation.');
     }
 
-    if (hasReferenceImages(history, uploadedImages)) {
+    // gpt-image-2 does not support reference images
+    if (useImagesAPI && hasReferenceImages(history, uploadedImages)) {
+      throw new ImageProcessingError(
+        'gpt-image-2 does not support reference images. Please use text prompt only.'
+      );
+    }
+
+    // For non-gpt-image-2 models (like dall-e-3), check reference images
+    if (!useImagesAPI && hasReferenceImages(history, uploadedImages)) {
       throw new ImageProcessingError(
         'OpenAI image generation does not support reference images in this mode.'
       );
@@ -204,7 +252,16 @@ export async function generateImageBatchStreamOpenAI(
     const normalizedModel = model.toLowerCase();
     const size = mapAspectRatioToOpenAISize(settings.aspectRatio, model);
     const quality = mapResolutionToOpenAIQuality(settings.resolution, model);
-    const responseFormat = normalizedModel.includes('dall-e') ? 'b64_json' : undefined;
+    const responseFormat = normalizedModel.includes('dall-e') ? 'b64_json' : 'b64_json';
+
+    console.log('[Images API] Request params:', {
+      model,
+      prompt: prompt.substring(0, 50) + '...',
+      n: settings.batchSize,
+      size,
+      quality,
+      responseFormat
+    });
 
     let attempt = 0;
     let response: OpenAI.ImagesResponse | null = null;
@@ -219,7 +276,12 @@ export async function generateImageBatchStreamOpenAI(
           n: settings.batchSize,
           size,
           ...(quality ? { quality } : {}),
-          ...(responseFormat ? { response_format: responseFormat } : {})
+          response_format: responseFormat
+        });
+
+        console.log('[Images API] Response received:', {
+          hasData: !!response.data,
+          dataLength: response.data?.length
         });
       } catch (error) {
         attempt++;
@@ -260,9 +322,11 @@ export async function generateImageBatchStreamOpenAI(
 
       if ('b64_json' in item && item.b64_json) {
         imageData = `data:image/png;base64,${item.b64_json}`;
+        console.log('[Images API] Found b64_json image:', imageData.substring(0, 50));
       } else if ('url' in item && item.url) {
         imageData = item.url;
         mimeType = inferImageMimeTypeFromUrl(item.url);
+        console.log('[Images API] Found URL image:', imageData);
       }
 
       if (imageData) {
@@ -284,6 +348,7 @@ export async function generateImageBatchStreamOpenAI(
     return;
   }
 
+  // Route 2: Chat Completions API flow (for nanobanana, Gemini models)
   const formattedHistory = buildHistory(history);
 
   // Build user message parts
@@ -338,9 +403,12 @@ export async function generateImageBatchStreamOpenAI(
   }
 
   // Build extra_body for image generation settings
-  const extraBody: Record<string, unknown> = {
-    modalities: ['image']
-  };
+  const extraBody: Record<string, unknown> = {};
+
+  // Only add modalities for Gemini-compatible endpoints
+  if (useGeminiCompat) {
+    extraBody.modalities = ['image'];
+  }
 
   // Set aspect ratio if specified
   if (settings.aspectRatio && settings.aspectRatio !== 'Auto') {
@@ -379,12 +447,25 @@ export async function generateImageBatchStreamOpenAI(
           const response = await openai.chat.completions.create({
             model,
             messages,
-            // @ts-ignore - extra_body is not in types but supported by API
-            extra_body: extraBody
+            // Only add extra_body if there are parameters (for Gemini-compatible endpoints)
+            ...(Object.keys(extraBody).length > 0 ? {
+              // @ts-ignore - extra_body is not in types but supported by API
+              extra_body: extraBody
+            } : {})
+          });
+
+          // Debug: Log the full response for troubleshooting
+          console.log('[OpenAI API Response]', {
+            model,
+            hasChoices: !!response.choices,
+            choicesLength: response.choices?.length,
+            firstChoice: response.choices?.[0],
+            fullResponse: response
           });
 
           const choice = response.choices?.[0];
           if (!choice) {
+            console.error('[OpenAI API] No choice in response:', response);
             throw new ImageProcessingError('No choice returned from API');
           }
 
@@ -395,11 +476,18 @@ export async function generateImageBatchStreamOpenAI(
 
           const message = choice.message;
           if (!message?.content) {
+            console.error('[OpenAI API] No content in message:', { choice, message });
             throw new ImageProcessingError('No content in response');
           }
 
           // Extract image and text from response
           let foundImage = false;
+
+          console.log('[Content Type]', {
+            isString: typeof message.content === 'string',
+            isArray: Array.isArray(message.content),
+            content: message.content
+          });
 
           // Handle different content formats
           if (typeof message.content === 'string') {
@@ -408,6 +496,7 @@ export async function generateImageBatchStreamOpenAI(
               /data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/
             );
             if (dataUriMatch) {
+              console.log('[Found image in string]', dataUriMatch[0].substring(0, 100));
               const img: GeneratedImage = {
                 id: generateUUID(),
                 data: dataUriMatch[0],
@@ -417,11 +506,26 @@ export async function generateImageBatchStreamOpenAI(
               callbacks.onImage(img);
               foundImage = true;
             } else {
-              // Text response
-              callbacks.onText(message.content);
+              // Text response - might contain URL or other format
+              console.log('[Text response]', message.content);
+              // Check if it's a URL
+              if (message.content.startsWith('http://') || message.content.startsWith('https://')) {
+                console.log('[Found image URL]', message.content);
+                const img: GeneratedImage = {
+                  id: generateUUID(),
+                  data: message.content,
+                  mimeType: inferImageMimeTypeFromUrl(message.content),
+                  status: 'success'
+                };
+                callbacks.onImage(img);
+                foundImage = true;
+              } else {
+                callbacks.onText(message.content);
+              }
             }
           } else if (Array.isArray(message.content)) {
             // Handle array content
+            console.log('[Array content]', message.content.length, 'parts');
             for (const part of message.content) {
               if (typeof part === 'object' && part !== null) {
                 if ('image_url' in part && part.image_url) {
@@ -431,6 +535,7 @@ export async function generateImageBatchStreamOpenAI(
                       : part.image_url.url;
 
                   if (imageUrl) {
+                    console.log('[Found image_url]', imageUrl.substring(0, 100));
                     const img: GeneratedImage = {
                       id: generateUUID(),
                       data: imageUrl,
@@ -441,6 +546,7 @@ export async function generateImageBatchStreamOpenAI(
                     foundImage = true;
                   }
                 } else if ('text' in part && part.text) {
+                  console.log('[Found text part]', part.text);
                   callbacks.onText(part.text);
                 }
               }
@@ -450,6 +556,7 @@ export async function generateImageBatchStreamOpenAI(
           if (foundImage) {
             success = true;
           } else {
+            console.error('[No image found in response]', { message });
             throw new ImageProcessingError('No image data in response');
           }
         } catch (error) {

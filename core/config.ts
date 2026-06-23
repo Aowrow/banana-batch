@@ -2,10 +2,10 @@ import { AppSettings, ProviderConfig } from '../types';
 
 // Centralized defaults for agent/skill usage. Fill in your keys here if desired.
 export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
-  provider: 'gemini',
+  provider: 'openai',
   apiKey: '',
-  baseUrl: '',
-  model: 'gemini-3-pro-image-preview'
+  baseUrl: 'https://api.openai.com/v1',
+  model: 'gpt-image-2'
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {

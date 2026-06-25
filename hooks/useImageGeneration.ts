@@ -10,21 +10,33 @@ interface UseImageGenerationOptions {
   getLatestMessages: (sessionId: string) => Message[];
 }
 
+interface MessageGenerationState {
+  progress: { current: number; total: number };
+  abortController: AbortController;
+}
+
 interface GenerationState {
   isGenerating: boolean;
   progress: { current: number; total: number } | null;
   currentMessageId?: string;
+  activeGenerations: Record<string, MessageGenerationState>;
 }
 
+const EMPTY_GENERATION_STATE: GenerationState = {
+  isGenerating: false,
+  progress: null,
+  currentMessageId: undefined,
+  activeGenerations: {}
+};
+
 /**
- * Custom hook for managing per-session image generation with abort handling
+ * Custom hook for managing per-session image generation with concurrent task support
  */
 export function useImageGeneration(options: UseImageGenerationOptions) {
   const { onImageGenerated, onTextGenerated, onError, getLatestMessages } = options;
 
   const [generationStates, setGenerationStates] = useState<Record<string, GenerationState>>({});
   const generationStatesRef = useRef<Record<string, GenerationState>>(generationStates);
-  const abortControllersRef = useRef<Record<string, AbortController>>({});
 
   useEffect(() => {
     generationStatesRef.current = generationStates;
@@ -33,7 +45,12 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
   const setSessionState = useCallback(
     (sessionId: string, updater: (prev: GenerationState) => GenerationState) => {
       setGenerationStates((prev) => {
-        const current = prev[sessionId] || { isGenerating: false, progress: null };
+        const current: GenerationState = prev[sessionId]
+          ? {
+              ...prev[sessionId],
+              activeGenerations: prev[sessionId].activeGenerations || {}
+            }
+          : { ...EMPTY_GENERATION_STATE };
         const next = updater(current);
         return {
           ...prev,
@@ -46,16 +63,24 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
 
   const stopGeneration = useCallback(
     (sessionId: string) => {
-      const controller = abortControllersRef.current[sessionId];
-      if (controller) {
-        controller.abort();
-        delete abortControllersRef.current[sessionId];
-      }
-      setSessionState(sessionId, () => ({
-        isGenerating: false,
-        progress: null,
-        currentMessageId: undefined
-      }));
+      setSessionState(sessionId, (prev) => {
+        // Abort all active generations in this session
+        const activeGens = prev.activeGenerations || {};
+        Object.values(activeGens).forEach((gen) => {
+          try {
+            gen.abortController.abort();
+          } catch (e) {
+            // Ignore abort errors
+          }
+        });
+
+        return {
+          isGenerating: false,
+          progress: null,
+          currentMessageId: undefined,
+          activeGenerations: {}
+        };
+      });
     },
     [setSessionState]
   );
@@ -68,16 +93,25 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
       modelMessageId: string,
       uploadedImages?: UploadedImage[]
     ) => {
-      if (generationStatesRef.current[sessionId]?.isGenerating) return;
-
-      setSessionState(sessionId, () => ({
-        isGenerating: true,
-        progress: { current: 0, total: settings.batchSize },
-        currentMessageId: modelMessageId
-      }));
-
       const controller = new AbortController();
-      abortControllersRef.current[sessionId] = controller;
+
+      // Add this generation to active generations
+      setSessionState(sessionId, (prev) => {
+        const activeGenerations = {
+          ...(prev.activeGenerations || {}),
+          [modelMessageId]: {
+            progress: { current: 0, total: settings.batchSize },
+            abortController: controller
+          }
+        };
+
+        return {
+          isGenerating: true,
+          progress: { current: 0, total: settings.batchSize },
+          currentMessageId: modelMessageId,
+          activeGenerations
+        };
+      });
 
       try {
         const currentMessages = getLatestMessages(sessionId);
@@ -96,10 +130,22 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
               onTextGenerated(sessionId, modelMessageId, text);
             },
             onProgress: (current, total) => {
-              setSessionState(sessionId, (prev) => ({
-                ...prev,
-                progress: { current, total }
-              }));
+              setSessionState(sessionId, (prev) => {
+                const prevActive = prev.activeGenerations || {};
+                const activeGen = prevActive[modelMessageId];
+                if (!activeGen) return prev;
+
+                return {
+                  ...prev,
+                  activeGenerations: {
+                    ...prevActive,
+                    [modelMessageId]: {
+                      ...activeGen,
+                      progress: { current, total }
+                    }
+                  }
+                };
+              });
             }
           }
         });
@@ -111,14 +157,29 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
           onError(sessionId, modelMessageId, classifiedError);
         }
       } finally {
-        if (abortControllersRef.current[sessionId] === controller) {
-          delete abortControllersRef.current[sessionId];
-          setSessionState(sessionId, () => ({
-            isGenerating: false,
-            progress: null,
-            currentMessageId: undefined
-          }));
-        }
+        // Remove this generation from active generations
+        setSessionState(sessionId, (prev) => {
+          const prevActive = prev.activeGenerations || {};
+          const { [modelMessageId]: _removed, ...remainingGenerations } = prevActive;
+          const remainingKeys = Object.keys(remainingGenerations);
+          const hasActiveGenerations = remainingKeys.length > 0;
+
+          // Pick the most recent remaining generation as the current one
+          let nextProgress: { current: number; total: number } | null = null;
+          let nextCurrentMessageId: string | undefined = undefined;
+          if (hasActiveGenerations) {
+            const lastKey = remainingKeys[remainingKeys.length - 1];
+            nextProgress = remainingGenerations[lastKey].progress;
+            nextCurrentMessageId = lastKey;
+          }
+
+          return {
+            isGenerating: hasActiveGenerations,
+            progress: nextProgress,
+            currentMessageId: nextCurrentMessageId,
+            activeGenerations: remainingGenerations
+          };
+        });
       }
     },
     [getLatestMessages, onImageGenerated, onTextGenerated, onError, setSessionState]
@@ -134,19 +195,31 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
       currentImageCount: number,
       uploadedImages?: UploadedImage[]
     ) => {
-      if (generationStatesRef.current[sessionId]?.isGenerating) return;
-
-      setSessionState(sessionId, () => ({
-        isGenerating: true,
-        progress: {
-          current: currentImageCount,
-          total: currentImageCount + settings.batchSize
-        },
-        currentMessageId: modelMessageId
-      }));
-
       const controller = new AbortController();
-      abortControllersRef.current[sessionId] = controller;
+
+      // Add this generation to active generations
+      setSessionState(sessionId, (prev) => {
+        const activeGenerations = {
+          ...(prev.activeGenerations || {}),
+          [modelMessageId]: {
+            progress: {
+              current: currentImageCount,
+              total: currentImageCount + settings.batchSize
+            },
+            abortController: controller
+          }
+        };
+
+        return {
+          isGenerating: true,
+          progress: {
+            current: currentImageCount,
+            total: currentImageCount + settings.batchSize
+          },
+          currentMessageId: modelMessageId,
+          activeGenerations
+        };
+      });
 
       try {
         await runImageGeneration({
@@ -163,14 +236,25 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
               onTextGenerated(sessionId, modelMessageId, text);
             },
             onProgress: (current, total) => {
-              setSessionState(sessionId, () => ({
-                isGenerating: true,
-                progress: {
-                  current: currentImageCount + current,
-                  total: currentImageCount + total
-                },
-                currentMessageId: modelMessageId
-              }));
+              setSessionState(sessionId, (prev) => {
+                const prevActive = prev.activeGenerations || {};
+                const activeGen = prevActive[modelMessageId];
+                if (!activeGen) return prev;
+
+                return {
+                  ...prev,
+                  activeGenerations: {
+                    ...prevActive,
+                    [modelMessageId]: {
+                      ...activeGen,
+                      progress: {
+                        current: currentImageCount + current,
+                        total: currentImageCount + total
+                      }
+                    }
+                  }
+                };
+              });
             }
           }
         });
@@ -182,14 +266,28 @@ export function useImageGeneration(options: UseImageGenerationOptions) {
           onError(sessionId, modelMessageId, classifiedError);
         }
       } finally {
-        if (abortControllersRef.current[sessionId] === controller) {
-          delete abortControllersRef.current[sessionId];
-          setSessionState(sessionId, () => ({
-            isGenerating: false,
-            progress: null,
-            currentMessageId: undefined
-          }));
-        }
+        // Remove this generation from active generations
+        setSessionState(sessionId, (prev) => {
+          const prevActive = prev.activeGenerations || {};
+          const { [modelMessageId]: _removed, ...remainingGenerations } = prevActive;
+          const remainingKeys = Object.keys(remainingGenerations);
+          const hasActiveGenerations = remainingKeys.length > 0;
+
+          let nextProgress: { current: number; total: number } | null = null;
+          let nextCurrentMessageId: string | undefined = undefined;
+          if (hasActiveGenerations) {
+            const lastKey = remainingKeys[remainingKeys.length - 1];
+            nextProgress = remainingGenerations[lastKey].progress;
+            nextCurrentMessageId = lastKey;
+          }
+
+          return {
+            isGenerating: hasActiveGenerations,
+            progress: nextProgress,
+            currentMessageId: nextCurrentMessageId,
+            activeGenerations: remainingGenerations
+          };
+        });
       }
     },
     [onImageGenerated, onTextGenerated, onError, setSessionState]

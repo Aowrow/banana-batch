@@ -36,7 +36,7 @@ const ProviderConfigPanel: React.FC<ProviderConfigPanelProps> = ({
   onBaseUrlChange,
   onModelChange,
   theme,
-  batchSize = 2
+  batchSize = 1
 }) => {
   const isLight = theme === 'light';
   const [localApiKey, setLocalApiKey] = useState(config.apiKey);

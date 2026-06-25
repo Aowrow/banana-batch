@@ -9,7 +9,7 @@ export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  batchSize: 2,
+  batchSize: 1,
   aspectRatio: 'Auto',
   resolution: '1K',
   providerConfig: DEFAULT_PROVIDER_CONFIG

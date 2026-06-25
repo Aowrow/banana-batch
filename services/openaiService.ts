@@ -16,6 +16,7 @@ import { StreamCallbacks } from './geminiService';
 
 const MAX_CONCURRENT_REQUESTS = 10;
 const MAX_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Extracts base64 data from a data URI safely
@@ -77,6 +78,7 @@ function hasReferenceImages(
 function mapAspectRatioToOpenAISize(aspectRatio: AspectRatio | undefined, model: string): string {
   const normalizedModel = model.toLowerCase();
   const useDalleSizes = normalizedModel.includes('dall-e-3');
+  const isGptImage2 = normalizedModel.includes('gpt-image-2');
 
   if (!aspectRatio || aspectRatio === 'Auto') {
     return '1024x1024';
@@ -85,6 +87,16 @@ function mapAspectRatioToOpenAISize(aspectRatio: AspectRatio | undefined, model:
   const [width, height] = aspectRatio.split(':').map(Number);
   if (!width || !height || width === height) {
     return '1024x1024';
+  }
+
+  // gpt-image-2 supports more sizes
+  if (isGptImage2) {
+    if (width < height) {
+      // Portrait
+      return '1024x1536';
+    }
+    // Landscape
+    return '1536x1024';
   }
 
   if (width < height) {
@@ -100,9 +112,17 @@ function mapResolutionToOpenAIQuality(
 ): 'standard' | 'hd' | 'low' | 'medium' | 'high' | 'auto' | undefined {
   const normalizedModel = model.toLowerCase();
   const isDalle3 = normalizedModel.includes('dall-e-3');
+  const isGptImage2 = normalizedModel.includes('gpt-image-2');
 
   if (isDalle3) {
     return resolution && resolution !== '1K' ? 'hd' : 'standard';
+  }
+
+  if (isGptImage2) {
+    // gpt-image-2 uses: low, medium, high, auto
+    if (!resolution || resolution === '1K') return 'low';
+    if (resolution === '2K') return 'medium';
+    return 'high'; // 4K or higher
   }
 
   if (!resolution || resolution === '1K') return 'auto';
@@ -175,6 +195,217 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Converts base64 data URI to Blob for form upload
+ */
+function dataURItoBlob(dataURI: string): Blob {
+  const byteString = atob(dataURI.split(',')[1]);
+  const mimeString = dataURI.split(',')[0].split(':')[1].split(';')[0];
+  const ab = new ArrayBuffer(byteString.length);
+  const ia = new Uint8Array(ab);
+  for (let i = 0; i < byteString.length; i++) {
+    ia[i] = byteString.charCodeAt(i);
+  }
+  return new Blob([ab], { type: mimeString });
+}
+
+/**
+ * Generates images using gpt-image-2 image edit endpoint
+ */
+async function generateImageEditGptImage2(
+  openai: OpenAI,
+  model: string,
+  prompt: string,
+  history: Message[],
+  uploadedImages: UploadedImage[] | undefined,
+  settings: AppSettings,
+  callbacks: StreamCallbacks,
+  signal: AbortSignal
+): Promise<void> {
+  if (!prompt || prompt.trim().length === 0) {
+    throw new ImageProcessingError('Prompt is required for gpt-image-2 image editing.');
+  }
+
+  // Collect reference images
+  const referenceImages: { data: string; mimeType: string }[] = [];
+
+  // Add uploaded images
+  if (uploadedImages && uploadedImages.length > 0) {
+    for (const img of uploadedImages) {
+      const imageData = extractBase64Data(img.data);
+      if (imageData) {
+        referenceImages.push({
+          data: img.data,
+          mimeType: imageData.mimeType
+        });
+      }
+    }
+  }
+
+  // Add selected images from history
+  for (const msg of history) {
+    if (msg.role !== 'model' || !msg.selectedImageId || !msg.images) {
+      continue;
+    }
+    const selectedImg = msg.images.find((img) => img.id === msg.selectedImageId);
+    if (selectedImg && selectedImg.status === 'success') {
+      const imageData = extractBase64Data(selectedImg.data);
+      if (imageData) {
+        referenceImages.push({
+          data: selectedImg.data,
+          mimeType: imageData.mimeType
+        });
+      }
+    }
+  }
+
+  if (referenceImages.length === 0) {
+    throw new ImageProcessingError('No reference images found for image editing.');
+  }
+
+  const size = mapAspectRatioToOpenAISize(settings.aspectRatio, model);
+  const quality = mapResolutionToOpenAIQuality(settings.resolution, model);
+
+  console.log('[Images Edit API] Request params:', {
+    model,
+    prompt: prompt.substring(0, 50) + '...',
+    n: settings.batchSize,
+    size,
+    quality,
+    imageCount: referenceImages.length
+  });
+
+  let attempt = 0;
+  let response: OpenAI.ImagesResponse | null = null;
+
+  while (attempt <= MAX_RETRIES && !response) {
+    if (signal.aborted) return;
+
+    // Per-attempt timeout that composes with the user's abort signal
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), REQUEST_TIMEOUT_MS);
+    const onUserAbort = () => timeoutController.abort();
+    signal.addEventListener('abort', onUserAbort);
+
+    try {
+      // Build FormData for multipart/form-data request
+      const formData = new FormData();
+      formData.append('model', model);
+      formData.append('prompt', prompt);
+      formData.append('n', settings.batchSize.toString());
+      formData.append('size', size);
+      if (quality) {
+        formData.append('quality', quality);
+      }
+      formData.append('response_format', 'b64_json');
+
+      // Add reference images as 'image[]'
+      for (let i = 0; i < referenceImages.length; i++) {
+        const refImg = referenceImages[i];
+        const blob = dataURItoBlob(refImg.data);
+        // Map mimeType to a server-accepted extension (png/webp/jpg)
+        const rawExt = (refImg.mimeType.split('/')[1] || 'png').toLowerCase();
+        const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
+        formData.append('image[]', blob, `image${i}.${ext}`);
+      }
+
+      // Use fetch directly for multipart/form-data
+      const rawBaseUrl = openai.baseURL || 'https://gptproto.com/v1';
+      const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+      const url = `${baseUrl}/images/edits`;
+
+      const fetchResponse = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openai.apiKey}`
+        },
+        body: formData,
+        signal: timeoutController.signal
+      });
+
+      if (!fetchResponse.ok) {
+        const errorText = await fetchResponse.text();
+        throw new Error(`HTTP ${fetchResponse.status}: ${errorText}`);
+      }
+
+      response = await fetchResponse.json();
+
+      console.log('[Images Edit API] Response received:', {
+        hasData: !!response?.data,
+        dataLength: response?.data?.length
+      });
+    } catch (error) {
+      attempt++;
+
+      // Distinguish user abort from timeout
+      const userAborted = signal.aborted;
+      const timedOut = !userAborted && timeoutController.signal.aborted;
+
+      if (!userAborted) {
+        if (timedOut) {
+          logError(`OpenAI Image Edit API Attempt ${attempt}`, new NetworkError(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`));
+        } else if (
+          error instanceof Error &&
+          (error.message.includes('fetch') || error.message.includes('network'))
+        ) {
+          logError(`OpenAI Image Edit API Attempt ${attempt}`, new NetworkError(error.message));
+        } else {
+          logError(`OpenAI Image Edit API Attempt ${attempt}`, error);
+        }
+      }
+
+      if (attempt <= MAX_RETRIES && !userAborted) {
+        const waitTime = 1000 * Math.pow(2, attempt - 1);
+        await delay(waitTime);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      signal.removeEventListener('abort', onUserAbort);
+    }
+  }
+
+  if (!response) {
+    throw new ImageProcessingError('No response from OpenAI image edit API.');
+  }
+
+  const images = response.data || [];
+  if (images.length === 0) {
+    throw new ImageProcessingError('No image data in response');
+  }
+
+  let completed = 0;
+  for (const item of images) {
+    if (signal.aborted) return;
+
+    let imageData: string | undefined;
+    let mimeType = 'image/png';
+
+    if ('b64_json' in item && item.b64_json) {
+      imageData = `data:image/png;base64,${item.b64_json}`;
+      console.log('[Images Edit API] Found b64_json image:', imageData.substring(0, 50));
+    } else if ('url' in item && item.url) {
+      imageData = item.url;
+      mimeType = inferImageMimeTypeFromUrl(item.url);
+      console.log('[Images Edit API] Found URL image:', imageData);
+    }
+
+    if (imageData) {
+      callbacks.onImage({
+        id: generateUUID(),
+        data: imageData,
+        mimeType,
+        status: 'success'
+      });
+      completed++;
+      callbacks.onProgress(completed, settings.batchSize);
+    }
+  }
+
+  if (completed === 0) {
+    throw new ImageProcessingError('No image data in response');
+  }
+}
+
+/**
  * Generates images using OpenAI-compatible API with custom baseURL support
  */
 export async function generateImageBatchStreamOpenAI(
@@ -221,6 +452,8 @@ export async function generateImageBatchStreamOpenAI(
   const openai = new OpenAI({
     apiKey,
     baseURL: normalizedBaseUrl,
+    timeout: REQUEST_TIMEOUT_MS,
+    maxRetries: 0, // We handle retries ourselves
     dangerouslyAllowBrowser: true // Required for browser usage
   });
 
@@ -230,20 +463,29 @@ export async function generateImageBatchStreamOpenAI(
 
   // Route 1: Standard OpenAI Images API (for gpt-image-2, dall-e-3, etc.)
   if (useImagesAPI || (!useGeminiCompat && !useChatCompletions)) {
-    // Standard OpenAI Image API flow
+    const hasRefImages = hasReferenceImages(history, uploadedImages);
+
+    // If gpt-image-2 with reference images, use image edit endpoint
+    if (useImagesAPI && hasRefImages) {
+      return await generateImageEditGptImage2(
+        openai,
+        model,
+        prompt,
+        history,
+        uploadedImages,
+        settings,
+        callbacks,
+        signal
+      );
+    }
+
+    // Standard text-to-image flow
     if (!prompt || prompt.trim().length === 0) {
       throw new ImageProcessingError('Prompt is required for OpenAI image generation.');
     }
 
-    // gpt-image-2 does not support reference images
-    if (useImagesAPI && hasReferenceImages(history, uploadedImages)) {
-      throw new ImageProcessingError(
-        'gpt-image-2 does not support reference images. Please use text prompt only.'
-      );
-    }
-
     // For non-gpt-image-2 models (like dall-e-3), check reference images
-    if (!useImagesAPI && hasReferenceImages(history, uploadedImages)) {
+    if (!useImagesAPI && hasRefImages) {
       throw new ImageProcessingError(
         'OpenAI image generation does not support reference images in this mode.'
       );

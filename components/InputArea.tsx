@@ -360,7 +360,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   };
 
   const handleSend = () => {
-    if ((text.trim() || uploadedImages.length > 0) && !disabled && !isProcessingImages) {
+    if ((text.trim() || uploadedImages.length > 0) && !isProcessingImages) {
       onSend(text.trim(), uploadedImages.length > 0 ? uploadedImages : undefined);
       setText('');
       setUploadedImages([]);
@@ -492,11 +492,9 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={disabled}
+            disabled={isProcessingImages}
             placeholder={
-              disabled
-                ? '正在生成图片... 点击停止按钮取消'
-                : isProcessingImages
+              isProcessingImages
                 ? '正在处理图片...'
                 : uploadedImages.length > 0
                 ? `已添加 ${uploadedImages.length} 张图片，输入描述或直接发送...`
@@ -517,27 +515,29 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
             rows={1}
           />
           
-          {disabled ? (
-            <button
-              onClick={onStop}
-              className={`
-                absolute right-2.5 bottom-2.5 w-10 h-10 rounded-xl 
-                flex items-center justify-center transition-all duration-200
-                ${isLight
-                  ? 'bg-red-500/10 text-red-600 hover:bg-red-500 hover:text-white border border-red-500/30 hover:border-red-500 shadow-md hover:scale-105'
-                  : 'bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white border border-red-500/50 hover:border-red-500 shadow-md hover:scale-105'
-                }
-              `}
-              title="停止生成"
-            >
-              <Square size={18} fill="currentColor" />
-            </button>
-          ) : (
+          {/* Always show send button, add stop button separately if generating */}
+          <div className="absolute right-2.5 bottom-2.5 flex gap-2">
+            {disabled && (
+              <button
+                onClick={onStop}
+                className={`
+                  w-10 h-10 rounded-xl
+                  flex items-center justify-center transition-all duration-200
+                  ${isLight
+                    ? 'bg-red-500/10 text-red-600 hover:bg-red-500 hover:text-white border border-red-500/30 hover:border-red-500 shadow-md hover:scale-105'
+                    : 'bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white border border-red-500/50 hover:border-red-500 shadow-md hover:scale-105'
+                  }
+                `}
+                title="停止当前生成"
+              >
+                <Square size={18} fill="currentColor" />
+              </button>
+            )}
             <button
               onClick={handleSend}
               disabled={(!text.trim() && uploadedImages.length === 0) || isProcessingImages}
               className={`
-                absolute right-2.5 bottom-2.5 w-10 h-10 rounded-xl
+                w-10 h-10 rounded-xl
                 flex items-center justify-center transition-all duration-200
                 ${((!text.trim() && uploadedImages.length === 0) || isProcessingImages)
                   ? (isLight
@@ -558,7 +558,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
             >
               {isProcessingImages ? <Loader2 size={20} className="animate-spin" /> : <SendHorizontal size={20} />}
             </button>
-          )}
+          </div>
         </div>
       </div>
       <div className={`max-w-4xl mx-auto mt-3 text-center text-xs transition-colors duration-200 ${

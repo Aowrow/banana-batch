@@ -13,9 +13,10 @@ interface MessageListProps {
   onDeleteMessage?: (messageId: string) => void;
   theme: 'light' | 'dark';
   currentGeneratingMessageId?: string;
+  activeGenerations: Record<string, { progress: { current: number; total: number } }>;
 }
 
-const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progress, onSelectImage, onRetry, onRegenerate, onDeleteMessage, theme, currentGeneratingMessageId }) => {
+const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progress, onSelectImage, onRetry, onRegenerate, onDeleteMessage, theme, currentGeneratingMessageId, activeGenerations }) => {
   const isLight = theme === 'light';
   const bottomRef = useRef<HTMLDivElement>(null);
   
@@ -417,22 +418,22 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                         <div className="flex items-center space-x-2.5">
                           <div className={`
                             w-2 h-2 rounded-full transition-all duration-300
-                            ${currentGeneratingMessageId === msg.id && !msg.selectedImageId 
-                              ? 'bg-indigo-500 animate-pulse shadow-lg shadow-indigo-500/50' 
+                            ${activeGenerations[msg.id] && !msg.selectedImageId
+                              ? 'bg-indigo-500 animate-pulse shadow-lg shadow-indigo-500/50'
                               : (isLight ? 'bg-gray-400' : 'bg-zinc-600')
                             }
                           `}></div>
                           <span className="text-sm font-medium">
-                          {msg.selectedImageId 
-                              ? `已选中 1 张图片，共生成 ${msg.images.length} 张` 
-                              : currentGeneratingMessageId === msg.id
-                                  ? `正在生成... 已完成 ${msg.images.length} 张` 
+                          {msg.selectedImageId
+                              ? `已选中 1 张图片，共生成 ${msg.images.length} 张`
+                              : activeGenerations[msg.id]
+                                  ? `正在生成... 已完成 ${msg.images.length} 张`
                                   : `已生成 ${msg.images.length} 张图片`}
                           </span>
                         </div>
-                        
+
                         {/* Action buttons - show next to model messages */}
-                        {(onRetry || onRegenerate) && currentGeneratingMessageId !== msg.id && (
+                        {(onRetry || onRegenerate) && !activeGenerations[msg.id] && (
                           <div className="flex items-center gap-2">
                             {onRetry && (
                               <button
@@ -503,36 +504,36 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                    )}
                  </div>
               )}
+
+              {/* Per-message progress indicator */}
+              {activeGenerations[msg.id] && (
+                <div className={`mt-3 flex items-center space-x-3 px-3 py-2 rounded-lg border ${
+                  isLight
+                    ? 'bg-indigo-50 border-indigo-200'
+                    : 'bg-indigo-900/20 border-indigo-800'
+                }`}>
+                  <Loader2 size={14} className="animate-spin text-indigo-500" />
+                  <span className={`text-xs font-medium ${
+                    isLight ? 'text-indigo-700' : 'text-indigo-300'
+                  }`}>
+                    正在生成... ({activeGenerations[msg.id].progress.current}/{activeGenerations[msg.id].progress.total})
+                  </span>
+                  <div className={`flex-1 h-1 rounded-full overflow-hidden ${
+                    isLight ? 'bg-indigo-200' : 'bg-indigo-950'
+                  }`}>
+                    <div
+                      className="h-full bg-indigo-500 transition-all duration-300 ease-out"
+                      style={{
+                        width: `${(activeGenerations[msg.id].progress.current / activeGenerations[msg.id].progress.total) * 100}%`
+                      }}
+                    ></div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
       ))}
-      
-      {/* Loading Indicator for Pending/Queue */}
-      {isGenerating && progress && (
-        <div className="flex justify-start ml-12">
-           <div className={`flex items-center space-x-3 border rounded-lg px-4 py-2 ${
-             isLight
-               ? 'bg-gray-100 border-gray-300'
-               : 'bg-zinc-900/50 border-zinc-800'
-           }`}>
-                 <Loader2 size={14} className="animate-spin text-indigo-500" />
-                 <span className={`text-xs font-medium ${
-                   isLight ? 'text-gray-600' : 'text-zinc-400'
-                 }`}>
-                    Processing batch... ({progress.current}/{progress.total})
-                 </span>
-                 <div className={`w-24 h-1 rounded-full overflow-hidden ${
-                   isLight ? 'bg-gray-300' : 'bg-zinc-800'
-                 }`}>
-                      <div 
-                        className="h-full bg-indigo-500 transition-all duration-300 ease-out"
-                        style={{ width: `${(progress.current / progress.total) * 100}%` }}
-                      ></div>
-                 </div>
-           </div>
-        </div>
-      )}
 
       <div ref={bottomRef} />
     </div>

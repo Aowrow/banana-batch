@@ -40,7 +40,7 @@ const App: React.FC = () => {
   } = useProviderConfig();
 
   const { settings, updateSettings, updateProviderConfig } = useSettings({
-    batchSize: 2,
+    batchSize: 1,
     aspectRatio: 'Auto',
     resolution: '1K',
     providerConfig
@@ -195,13 +195,14 @@ const App: React.FC = () => {
   const currentGenerationState = generationStates[currentSessionId] || {
     isGenerating: false,
     progress: null,
-    currentMessageId: undefined
+    currentMessageId: undefined,
+    activeGenerations: {}
   };
 
   // Handle sending new message
   const handleSend = useCallback(
     async (text: string, images?: UploadedImage[]) => {
-      if (currentGenerationState.isGenerating) return;
+      // Remove the concurrent generation check - allow multiple generations
       const sessionId = currentSessionId;
 
       // Create user message
@@ -233,7 +234,7 @@ const App: React.FC = () => {
       // Start generation
       await generateImages(sessionId, text || '', settings, modelMsgId, images);
     },
-    [currentGenerationState.isGenerating, currentSessionId, settings, addMessagesToSession, generateImages]
+    [currentSessionId, settings, addMessagesToSession, generateImages]
   );
 
   const resolveMessagePair = useCallback(
@@ -264,7 +265,7 @@ const App: React.FC = () => {
   // Handle retry
   const handleRetry = useCallback(
     async (modelMessageId: string) => {
-      if (currentGenerationState.isGenerating) return;
+      // Remove the concurrent generation check - allow multiple generations
       const sessionId = currentSessionId;
 
       const resolved = resolveMessagePair(sessionId, modelMessageId);
@@ -284,12 +285,12 @@ const App: React.FC = () => {
         userMsg.uploadedImages
       );
     },
-    [currentGenerationState.isGenerating, currentSessionId, settings, resolveMessagePair, retryGeneration]
+    [currentSessionId, settings, resolveMessagePair, retryGeneration]
   );
 
   const handleRegenerate = useCallback(
     (modelMessageId: string) => {
-      if (currentGenerationState.isGenerating) return;
+      // Remove the concurrent generation check - allow multiple generations
       const sessionId = currentSessionId;
 
       const resolved = resolveMessagePair(sessionId, modelMessageId);
@@ -300,7 +301,7 @@ const App: React.FC = () => {
         images: resolved.userMsg.uploadedImages ?? []
       });
     },
-    [currentGenerationState.isGenerating, currentSessionId, resolveMessagePair]
+    [currentSessionId, resolveMessagePair]
   );
 
   // Handle image selection
@@ -452,6 +453,7 @@ const App: React.FC = () => {
               onDeleteMessage={handleDeleteMessages}
               theme={theme}
               currentGeneratingMessageId={currentGenerationState.currentMessageId}
+              activeGenerations={currentGenerationState.activeGenerations || {}}
             />
 
             {/* Input Area (Sticky) */}

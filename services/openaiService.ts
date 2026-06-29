@@ -298,17 +298,14 @@ async function generateImageEditGptImage2(
       }
       formData.append('response_format', 'b64_json');
 
-      // Add the first reference image as 'image' (OpenAI standard)
-      const refImg = referenceImages[0];
-      const blob = dataURItoBlob(refImg.data);
-      // Map mimeType to a server-accepted extension (png/webp/jpg)
-      const rawExt = (refImg.mimeType.split('/')[1] || 'png').toLowerCase();
-      const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
-      formData.append('image', blob, `image.${ext}`);
-
-      // If there are multiple images, add them as 'mask' or log a warning
-      if (referenceImages.length > 1) {
-        console.warn('[Images Edit API] Multiple reference images provided, but only the first will be used as the base image.');
+      // Add reference images as 'image[]' array (gpt-image-2 supports up to 16 images)
+      for (let i = 0; i < referenceImages.length; i++) {
+        const refImg = referenceImages[i];
+        const blob = dataURItoBlob(refImg.data);
+        // Map mimeType to a server-accepted extension (png/webp/jpg)
+        const rawExt = (refImg.mimeType.split('/')[1] || 'png').toLowerCase();
+        const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
+        formData.append('image[]', blob, `image${i}.${ext}`);
       }
 
       // Use fetch directly for multipart/form-data

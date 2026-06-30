@@ -274,133 +274,151 @@ async function generateImageEditGptImage2(
     imageCount: referenceImages.length
   });
 
-  let attempt = 0;
-  let response: OpenAI.ImagesResponse | null = null;
+  // Workaround: Some proxy servers (like newapi.funmz.com) have issues with n>1
+  // Generate images one by one if batchSize > 1
+  const shouldUseSingleRequests = settings.batchSize > 1;
+  const actualBatchSize = shouldUseSingleRequests ? 1 : settings.batchSize;
+  const numRequests = shouldUseSingleRequests ? settings.batchSize : 1;
 
-  while (attempt <= MAX_RETRIES && !response) {
+  const allImages: GeneratedImage[] = [];
+
+  for (let reqIndex = 0; reqIndex < numRequests; reqIndex++) {
     if (signal.aborted) return;
 
-    // Per-attempt timeout that composes with the user's abort signal
-    const timeoutController = new AbortController();
-    const timeoutId = setTimeout(() => timeoutController.abort(), REQUEST_TIMEOUT_MS);
-    const onUserAbort = () => timeoutController.abort();
-    signal.addEventListener('abort', onUserAbort);
+    let attempt = 0;
+    let response: OpenAI.ImagesResponse | null = null;
 
-    try {
-      // Build FormData for multipart/form-data request
-      const formData = new FormData();
-      formData.append('model', model);
-      formData.append('prompt', prompt);
-      formData.append('n', settings.batchSize.toString());
-      formData.append('size', size);
-      if (quality) {
-        formData.append('quality', quality);
-      }
-      formData.append('response_format', 'b64_json');
+    while (attempt <= MAX_RETRIES && !response) {
+      if (signal.aborted) return;
 
-      // Add reference images as 'image[]' array (gpt-image-2 supports up to 16 images)
-      for (let i = 0; i < referenceImages.length; i++) {
-        const refImg = referenceImages[i];
-        const blob = dataURItoBlob(refImg.data);
-        // Map mimeType to a server-accepted extension (png/webp/jpg)
-        const rawExt = (refImg.mimeType.split('/')[1] || 'png').toLowerCase();
-        const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
-        formData.append('image[]', blob, `image${i}.${ext}`);
-      }
+      // Per-attempt timeout that composes with the user's abort signal
+      const timeoutController = new AbortController();
+      const timeoutId = setTimeout(() => timeoutController.abort(), REQUEST_TIMEOUT_MS);
+      const onUserAbort = () => timeoutController.abort();
+      signal.addEventListener('abort', onUserAbort);
 
-      // Use fetch directly for multipart/form-data
-      const rawBaseUrl = openai.baseURL || 'https://gptproto.com/v1';
-      const baseUrl = rawBaseUrl.replace(/\/+$/, '');
-      const url = `${baseUrl}/images/edits`;
-
-      const fetchResponse = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openai.apiKey}`
-        },
-        body: formData,
-        signal: timeoutController.signal
-      });
-
-      if (!fetchResponse.ok) {
-        const errorText = await fetchResponse.text();
-        throw new Error(`HTTP ${fetchResponse.status}: ${errorText}`);
-      }
-
-      response = await fetchResponse.json();
-
-      console.log('[Images Edit API] Response received:', {
-        hasData: !!response?.data,
-        dataLength: response?.data?.length
-      });
-    } catch (error) {
-      attempt++;
-
-      // Distinguish user abort from timeout
-      const userAborted = signal.aborted;
-      const timedOut = !userAborted && timeoutController.signal.aborted;
-
-      if (!userAborted) {
-        if (timedOut) {
-          logError(`OpenAI Image Edit API Attempt ${attempt}`, new NetworkError(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`));
-        } else if (
-          error instanceof Error &&
-          (error.message.includes('fetch') || error.message.includes('network'))
-        ) {
-          logError(`OpenAI Image Edit API Attempt ${attempt}`, new NetworkError(error.message));
-        } else {
-          logError(`OpenAI Image Edit API Attempt ${attempt}`, error);
+      try {
+        // Build FormData for multipart/form-data request
+        const formData = new FormData();
+        formData.append('model', model);
+        formData.append('prompt', prompt);
+        formData.append('n', actualBatchSize.toString());
+        formData.append('size', size);
+        if (quality) {
+          formData.append('quality', quality);
         }
+        formData.append('response_format', 'b64_json');
+
+        // Add reference images as 'image[]' array (gpt-image-2 supports up to 16 images)
+        for (let i = 0; i < referenceImages.length; i++) {
+          const refImg = referenceImages[i];
+          const blob = dataURItoBlob(refImg.data);
+          // Map mimeType to a server-accepted extension (png/webp/jpg)
+          const rawExt = (refImg.mimeType.split('/')[1] || 'png').toLowerCase();
+          const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
+          formData.append('image[]', blob, `image${i}.${ext}`);
+        }
+
+        // Debug: Log FormData keys
+        console.log('[Images Edit API] FormData keys:', Array.from(formData.keys()));
+
+        // Use fetch directly for multipart/form-data
+        const rawBaseUrl = openai.baseURL || 'https://gptproto.com/v1';
+        const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+        const url = `${baseUrl}/images/edits`;
+
+        const fetchResponse = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${openai.apiKey}`
+          },
+          body: formData,
+          signal: timeoutController.signal
+        });
+
+        if (!fetchResponse.ok) {
+          const errorText = await fetchResponse.text();
+          throw new Error(`HTTP ${fetchResponse.status}: ${errorText}`);
+        }
+
+        response = await fetchResponse.json();
+
+        console.log('[Images Edit API] Response received:', {
+          hasData: !!response?.data,
+          dataLength: response?.data?.length,
+          requestIndex: reqIndex + 1,
+          totalRequests: numRequests
+        });
+      } catch (error) {
+        attempt++;
+
+        // Distinguish user abort from timeout
+        const userAborted = signal.aborted;
+        const timedOut = !userAborted && timeoutController.signal.aborted;
+
+        if (!userAborted) {
+          if (timedOut) {
+            logError(`OpenAI Image Edit API Attempt ${attempt}`, new NetworkError(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`));
+          } else if (
+            error instanceof Error &&
+            (error.message.includes('fetch') || error.message.includes('network'))
+          ) {
+            logError(`OpenAI Image Edit API Attempt ${attempt}`, new NetworkError(error.message));
+          } else {
+            logError(`OpenAI Image Edit API Attempt ${attempt}`, error);
+          }
+        }
+
+        if (attempt <= MAX_RETRIES && !userAborted) {
+          const waitTime = 1000 * Math.pow(2, attempt - 1);
+          await delay(waitTime);
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        signal.removeEventListener('abort', onUserAbort);
+      }
+    }
+
+    if (!response) {
+      throw new ImageProcessingError('No response from OpenAI image edit API.');
+    }
+
+    const images = response.data || [];
+    if (images.length === 0) {
+      throw new ImageProcessingError('No image data in response');
+    }
+
+    // Collect images from this request
+    for (const item of images) {
+      if (signal.aborted) return;
+
+      let imageData: string | undefined;
+      let mimeType = 'image/png';
+
+      if ('b64_json' in item && item.b64_json) {
+        imageData = `data:image/png;base64,${item.b64_json}`;
+        console.log('[Images Edit API] Found b64_json image:', imageData.substring(0, 50));
+      } else if ('url' in item && item.url) {
+        imageData = item.url;
+        mimeType = inferImageMimeTypeFromUrl(item.url);
+        console.log('[Images Edit API] Found URL image:', imageData);
       }
 
-      if (attempt <= MAX_RETRIES && !userAborted) {
-        const waitTime = 1000 * Math.pow(2, attempt - 1);
-        await delay(waitTime);
+      if (imageData) {
+        const img: GeneratedImage = {
+          id: generateUUID(),
+          data: imageData,
+          mimeType,
+          status: 'success'
+        };
+        allImages.push(img);
+        callbacks.onImage(img);
+        callbacks.onProgress(allImages.length, settings.batchSize);
       }
-    } finally {
-      clearTimeout(timeoutId);
-      signal.removeEventListener('abort', onUserAbort);
     }
   }
 
-  if (!response) {
-    throw new ImageProcessingError('No response from OpenAI image edit API.');
-  }
-
-  const images = response.data || [];
-  if (images.length === 0) {
-    throw new ImageProcessingError('No image data in response');
-  }
-
-  let completed = 0;
-  for (const item of images) {
-    if (signal.aborted) return;
-
-    let imageData: string | undefined;
-    let mimeType = 'image/png';
-
-    if ('b64_json' in item && item.b64_json) {
-      imageData = `data:image/png;base64,${item.b64_json}`;
-      console.log('[Images Edit API] Found b64_json image:', imageData.substring(0, 50));
-    } else if ('url' in item && item.url) {
-      imageData = item.url;
-      mimeType = inferImageMimeTypeFromUrl(item.url);
-      console.log('[Images Edit API] Found URL image:', imageData);
-    }
-
-    if (imageData) {
-      callbacks.onImage({
-        id: generateUUID(),
-        data: imageData,
-        mimeType,
-        status: 'success'
-      });
-      completed++;
-      callbacks.onProgress(completed, settings.batchSize);
-    }
-  }
-
-  if (completed === 0) {
+  if (allImages.length === 0) {
     throw new ImageProcessingError('No image data in response');
   }
 }

@@ -219,7 +219,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         ? 'bg-gray-100/80 border-gray-300'
         : 'bg-zinc-900/50 border-zinc-800'
     }`}>
-      
+
       {/* Batch Size Slider */}
       <div className={`flex items-center space-x-3 border-r pr-4 ${
         isLight ? 'border-gray-300' : 'border-zinc-700'
@@ -227,71 +227,71 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <div className={`flex items-center ${isLight ? 'text-gray-600' : 'text-zinc-400'}`} title="Batch Size">
           <Layers size={16} />
         </div>
-        <input 
-            type="range" 
-            min="1" 
-            max="20" 
-            step="1"
-            value={settings.batchSize} 
-            onChange={(e) => updateSettings({ batchSize: Number(e.target.value) })}
-            className={`w-20 h-1.5 rounded-lg appearance-none cursor-pointer accent-indigo-500 hover:accent-indigo-400 transition-all focus:outline-none ${
-              isLight ? 'bg-gray-300' : 'bg-zinc-700'
-            }`}
+        <input
+          type="range"
+          min="1"
+          max="20"
+          step="1"
+          value={settings.batchSize}
+          onChange={(e) => updateSettings({ batchSize: Number(e.target.value) })}
+          className={`w-20 h-1.5 rounded-lg appearance-none cursor-pointer accent-indigo-500 hover:accent-indigo-400 transition-all focus:outline-none ${
+            isLight ? 'bg-gray-300' : 'bg-zinc-700'
+          }`}
         />
         <div className={`min-w-[1.5rem] text-center text-sm font-bold ${
           isLight ? 'text-indigo-600' : 'text-indigo-400'
         }`}>
-            {settings.batchSize}
+          {settings.batchSize}
         </div>
       </div>
 
       {/* Aspect Ratio */}
       <div className="flex items-center space-x-2">
-         <Square size={16} className={isLight ? 'text-gray-600' : 'text-zinc-400'} />
-         <select 
-            value={settings.aspectRatio} 
-            onChange={(e) => updateSettings({ aspectRatio: e.target.value as AspectRatio })}
-            className={`text-xs font-medium rounded px-2 py-1 border focus:outline-none focus:border-indigo-500 cursor-pointer transition-colors ${
-              isLight
-                ? 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
-                : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
-            }`}
-         >
-            {ASPECT_RATIO_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-         </select>
-       </div>
+        <Square size={16} className={isLight ? 'text-gray-600' : 'text-zinc-400'} />
+        <select
+          value={settings.aspectRatio}
+          onChange={(e) => updateSettings({ aspectRatio: e.target.value as AspectRatio })}
+          className={`text-xs font-medium rounded px-2 py-1 border focus:outline-none focus:border-indigo-500 cursor-pointer transition-colors ${
+            isLight
+              ? 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+              : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+          }`}
+        >
+          {ASPECT_RATIO_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
 
       {/* Resolution */}
       <div className={`flex items-center space-x-2 border-r pr-4 ${
         isLight ? 'border-gray-300' : 'border-zinc-700'
       }`}>
-         <Monitor size={16} className={isLight ? 'text-gray-600' : 'text-zinc-400'} />
-         <select 
-            value={settings.resolution} 
-            onChange={(e) => updateSettings({ resolution: e.target.value as Resolution })}
-            className={`text-xs font-medium rounded px-2 py-1 border focus:outline-none focus:border-indigo-500 cursor-pointer transition-colors ${
-              isLight
-                ? 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
-                : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
-            }`}
-         >
-            <option value="1K">1K (Fast)</option>
-            <option value="2K">2K (Pro)</option>
-            <option value="4K">4K (Pro)</option>
-         </select>
+        <Monitor size={16} className={isLight ? 'text-gray-600' : 'text-zinc-400'} />
+        <select
+          value={settings.resolution}
+          onChange={(e) => updateSettings({ resolution: e.target.value as Resolution })}
+          className={`text-xs font-medium rounded px-2 py-1 border focus:outline-none focus:border-indigo-500 cursor-pointer transition-colors ${
+            isLight
+              ? 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+              : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+          }`}
+        >
+          <option value="1K">1K (Fast)</option>
+          <option value="2K">2K (Pro)</option>
+          <option value="4K">4K (Pro)</option>
+        </select>
       </div>
 
       {/* Theme Toggle */}
       <div className="flex items-center">
-        <button 
+        <button
           onClick={() => onThemeChange(theme === 'light' ? 'dark' : 'light')}
           className={`p-1.5 rounded transition-colors ${
-            isLight 
-              ? 'text-yellow-600 hover:text-yellow-700' 
+            isLight
+              ? 'text-yellow-600 hover:text-yellow-700'
               : 'text-yellow-400 hover:text-yellow-300'
           }`}
           title={theme === 'light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
@@ -304,7 +304,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className={`flex items-center space-x-1 border-r pr-4 ${
         isLight ? 'border-gray-300' : 'border-zinc-700'
       }`}>
-        <button 
+        <button
           onClick={handleExport}
           className={`p-1.5 rounded transition-colors ${
             isLight
@@ -315,7 +315,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         >
           <Download size={16} />
         </button>
-        <button 
+        <button
           onClick={handleImportClick}
           className={`p-1.5 rounded transition-colors ${
             isLight
@@ -371,7 +371,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <div className={`flex items-center border-r pr-4 ${
           isLight ? 'border-gray-300' : 'border-zinc-700'
         }`}>
-          <button 
+          <button
             onClick={() => {
               if (window.confirm('确定要清除所有对话历史吗？此操作不可撤销。')) {
                 onClearAll();

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, KeyboardEvent, DragEvent } from 'react';
-import { SendHorizontal, Square, X, Loader2 } from 'lucide-react';
+import { SendHorizontal, Square, X, Loader2, ImagePlus } from 'lucide-react';
 import { UploadedImage } from '../types';
 import { generateUUID } from '../utils/uuid';
 import {
@@ -14,7 +14,7 @@ import { optimizeImage, shouldOptimizeImage } from '../utils/imageOptimizer';
 interface InputAreaProps {
   onSend: (text: string, images?: UploadedImage[]) => void;
   onStop: () => void;
-  disabled: boolean; // This now means "isGenerating" essentially
+  disabled: boolean;
   theme: 'light' | 'dark';
   prefillRequest?: { text: string; images?: UploadedImage[] };
 }
@@ -30,6 +30,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
   const [dragOverPosition, setDragOverPosition] = useState<'before' | 'after'>('before');
   const dragCounterRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const MIN_TEXTAREA_HEIGHT = 64;
   const MAX_TEXTAREA_HEIGHT = 160;
   const INTERNAL_IMAGE_DRAG_TYPE = 'application/x-banana-uploaded-image';
@@ -210,7 +211,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
     e.preventDefault();
     e.stopPropagation();
     dragCounterRef.current++;
-    if (!disabled && !isProcessingImages && dragCounterRef.current === 1) {
+    if (!isProcessingImages && dragCounterRef.current === 1) {
       setIsDragging(true);
     }
   };
@@ -248,7 +249,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
     dragCounterRef.current = 0;
     setIsDragging(false);
 
-    if (disabled || isProcessingImages) return;
+    if (isProcessingImages) return;
 
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
@@ -372,6 +373,19 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
       e.preventDefault();
       handleSend();
     }
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      processFiles(files);
+    }
+    // Reset input value to allow selecting the same file again
+    e.target.value = '';
+  };
+
+  const handleUploadButtonClick = () => {
+    fileInputRef.current?.click();
   };
 
   return (
@@ -501,7 +515,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
                 : '描述你想要生成的图片，或拖放图片到这里...'
             }
             className={`
-              w-full border-0 rounded-2xl py-4 pl-5 pr-16
+              w-full border-0 rounded-2xl py-4 pl-5 pr-28
               focus:ring-2 focus:ring-indigo-500/50 focus:outline-none
               resize-none min-h-[64px] max-h-[160px]
               shadow-lg disabled:opacity-50 disabled:cursor-not-allowed
@@ -514,9 +528,40 @@ const InputArea: React.FC<InputAreaProps> = ({ onSend, onStop, disabled, theme, 
             `}
             rows={1}
           />
-          
+
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={handleFileInputChange}
+            className="hidden"
+          />
+
           {/* Always show send button, add stop button separately if generating */}
           <div className="absolute right-2.5 bottom-2.5 flex gap-2">
+            {/* Upload image button */}
+            <button
+              onClick={handleUploadButtonClick}
+              disabled={isProcessingImages}
+              className={`
+                w-10 h-10 rounded-xl
+                flex items-center justify-center transition-all duration-200
+                ${isProcessingImages
+                  ? (isLight
+                      ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                      : 'bg-zinc-800 text-zinc-600 cursor-not-allowed')
+                  : (isLight
+                      ? 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-300 hover:border-gray-400 shadow-md hover:scale-105'
+                      : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 border border-zinc-700 hover:border-zinc-600 shadow-md hover:scale-105')
+                }
+              `}
+              title="上传图片"
+            >
+              <ImagePlus size={20} />
+            </button>
+
             {disabled && (
               <button
                 onClick={onStop}

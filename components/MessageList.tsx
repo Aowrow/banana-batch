@@ -463,10 +463,10 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                                     : 'text-indigo-400 hover:bg-indigo-900/30 hover:shadow-md active:scale-95'
                                   }
                                 `}
-                                title="重新生成（填充上次输入）"
+                                title="重新编辑（填充上次输入）"
                               >
                                 <RefreshCcw size={14} />
-                                <span>重新生成</span>
+                                <span>重新编辑</span>
                               </button>
                             )}
                           </div>

@@ -75,7 +75,11 @@ function hasReferenceImages(
   );
 }
 
-function mapAspectRatioToOpenAISize(aspectRatio: AspectRatio | undefined, model: string): string {
+function mapAspectRatioToOpenAISize(
+  aspectRatio: AspectRatio | undefined,
+  model: string,
+  resolution?: Resolution
+): string {
   const normalizedModel = model.toLowerCase();
   const useDalleSizes = normalizedModel.includes('dall-e-3');
   const isGptImage2 = normalizedModel.includes('gpt-image-2');
@@ -89,14 +93,33 @@ function mapAspectRatioToOpenAISize(aspectRatio: AspectRatio | undefined, model:
     return '1024x1024';
   }
 
-  // gpt-image-2 supports more sizes
+  // gpt-image-2 supports arbitrary resolutions
+  // max edge ≤ 3840px, multiples of 16, aspect ratio ≤ 3:1, total pixels 655360–8294400
   if (isGptImage2) {
-    if (width < height) {
-      // Portrait
-      return '1024x1536';
+    const isPortrait = width < height;
+    const aspectValue = width / height;
+    // 1K uses 1536 as base to ensure minimum pixel count for wide ratios
+    const baseSize = resolution === '4K' ? 3840 : resolution === '2K' ? 2048 : 1536;
+
+    let w: number, h: number;
+    if (isPortrait) {
+      h = baseSize;
+      w = Math.round(h * aspectValue);
+    } else {
+      w = baseSize;
+      h = Math.round(w / aspectValue);
     }
-    // Landscape
-    return '1536x1024';
+
+    // Ensure multiples of 16
+    w = Math.round(w / 16) * 16;
+    h = Math.round(h / 16) * 16;
+
+    const totalPixels = w * h;
+    if (totalPixels < 655360 || totalPixels > 8294400) {
+      return isPortrait ? '1024x1536' : '1536x1024';
+    }
+
+    return `${w}x${h}`;
   }
 
   if (width < height) {
@@ -119,10 +142,9 @@ function mapResolutionToOpenAIQuality(
   }
 
   if (isGptImage2) {
-    // gpt-image-2 uses: low, medium, high, auto
-    if (!resolution || resolution === '1K') return 'low';
-    if (resolution === '2K') return 'medium';
-    return 'high'; // 4K or higher
+    // For gpt-image-2, size parameter controls actual resolution
+    // Let quality default to 'auto' (don't pass it)
+    return undefined;
   }
 
   if (!resolution || resolution === '1K') return 'auto';
@@ -262,7 +284,7 @@ async function generateImageEditGptImage2(
     throw new ImageProcessingError('No reference images found for image editing.');
   }
 
-  const size = mapAspectRatioToOpenAISize(settings.aspectRatio, model);
+  const size = mapAspectRatioToOpenAISize(settings.aspectRatio, model, settings.resolution);
   const quality = mapResolutionToOpenAIQuality(settings.resolution, model);
 
   console.log('[Images Edit API] Request params:', {
@@ -510,7 +532,7 @@ export async function generateImageBatchStreamOpenAI(
     }
 
     const normalizedModel = model.toLowerCase();
-    const size = mapAspectRatioToOpenAISize(settings.aspectRatio, model);
+    const size = mapAspectRatioToOpenAISize(settings.aspectRatio, model, settings.resolution);
     const quality = mapResolutionToOpenAIQuality(settings.resolution, model);
     const responseFormat = normalizedModel.includes('dall-e') ? 'b64_json' : 'b64_json';
 

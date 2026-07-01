@@ -46,24 +46,30 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
   // Download image function (memoized)
   const handleDownloadImage = useCallback(
     (e: React.MouseEvent, imageData: string, mimeType: string) => {
-      e.stopPropagation(); // Prevent triggering selection
+      e.stopPropagation();
 
       try {
-        // Create a temporary anchor element
-        const link = document.createElement('a');
-        link.href = imageData;
+        // Convert base64 data URI to Blob to avoid browser data: URI download warnings
+        const base64 = imageData.split(',')[1];
+        const byteChars = atob(base64);
+        const byteArray = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+          byteArray[i] = byteChars.charCodeAt(i);
+        }
+        const blob = new Blob([byteArray], { type: mimeType });
+        const url = URL.createObjectURL(blob);
 
-        // Generate filename with timestamp
+        const link = document.createElement('a');
+        link.href = url;
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
         const extension = mimeType.split('/')[1] || 'png';
         link.download = `banana-batch-${timestamp}.${extension}`;
 
-        // Trigger download
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        URL.revokeObjectURL(url);
       } catch (error) {
-        // Only log in development
         if (import.meta.env.DEV) {
           console.error('Failed to download image:', error);
         }

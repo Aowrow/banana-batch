@@ -104,6 +104,10 @@ export function classifyError(error: unknown): ErrorType {
  */
 export function getUserErrorMessage(error: unknown): string {
   const classifiedError = classifyError(error);
+  const detail = classifiedError.message;
+  if (detail && detail !== classifiedError.userMessage) {
+    return `${classifiedError.userMessage}\n\n${detail}`;
+  }
   return classifiedError.userMessage;
 }
 

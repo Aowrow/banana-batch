@@ -289,9 +289,15 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
               )}
 
               {/* Image Grid (Model only) */}
-              {msg.role === 'model' && msg.images && (
+              {msg.role === 'model' && msg.images && (() => {
+                const active = activeGenerations[msg.id];
+                const totalExpected = active?.progress.total ?? msg.images.length;
+                const doneCount = msg.images.length;
+                const pendingCount = active ? Math.max(0, totalExpected - doneCount) : 0;
+                const gridCount = Math.max(doneCount, active ? totalExpected : doneCount);
+                return (
                 <div className="w-full">
-                  <div className={`grid gap-4 ${getGridClass(msg.images.length)}`}>
+                  <div className={`grid gap-4 ${getGridClass(gridCount)}`}>
                     {msg.images.map((img, imgIndex) => {
                       const isSelected = msg.selectedImageId === img.id;
                       const hasSelection = !!msg.selectedImageId;
@@ -415,8 +421,40 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                         </div>
                       );
                     })}
+
+                    {/* Pending placeholders for images still being generated */}
+                    {pendingCount > 0 && Array.from({ length: pendingCount }).map((_, idx) => {
+                      const slotIndex = doneCount + idx + 1;
+                      return (
+                        <div
+                          key={`pending-${msg.id}-${idx}`}
+                          style={getAspectRatioStyle(msg.generationSettings?.aspectRatio)}
+                          className={`
+                            relative w-full rounded-2xl overflow-hidden border-2 border-dashed
+                            flex flex-col items-center justify-center
+                            animate-pulse
+                            ${isLight
+                              ? 'bg-gradient-to-br from-indigo-50 to-purple-50 border-indigo-200'
+                              : 'bg-gradient-to-br from-indigo-950/40 to-purple-950/40 border-indigo-800/50'}
+                          `}
+                          aria-label={`图 ${slotIndex} 正在生成`}
+                        >
+                          <div className="flex flex-col items-center gap-2">
+                            <Loader2
+                              size={32}
+                              className={`animate-spin ${isLight ? 'text-indigo-500' : 'text-indigo-400'}`}
+                            />
+                            <span className={`text-xs font-medium ${
+                              isLight ? 'text-indigo-600' : 'text-indigo-300'
+                            }`}>
+                              图 {slotIndex} 生成中
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                  
+
                   {msg.images.length > 0 && (
                       <div className={`mt-4 flex items-center justify-between px-1 ${
                         isLight ? 'text-gray-500' : 'text-zinc-400'
@@ -480,24 +518,27 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                       </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
 
               {/* Error State - only show if no images and an error flag is present */}
               {msg.isError && (!msg.images || msg.images.length === 0) && (
-                 <div className={`flex items-center justify-between px-3 py-2 rounded-lg text-sm ${
+                 <div className={`flex items-start justify-between px-3 py-2 rounded-lg text-sm ${
                    isLight
                      ? 'text-red-600 bg-red-50 border border-red-200'
                      : 'text-red-400 bg-red-900/10 border border-red-900/50'
                  }`}>
-                   <div className="flex items-center">
-                     <AlertTriangle size={14} className="mr-2" />
-                     Generation stopped or failed.
+                   <div className="flex items-start flex-1 min-w-0">
+                     <AlertTriangle size={14} className="mr-2 mt-0.5 flex-shrink-0" />
+                     <div className="whitespace-pre-wrap break-words">
+                       {msg.text || 'Generation stopped or failed.'}
+                     </div>
                    </div>
                    {/* Retry button for failed messages */}
                    {onRetry && (
                      <button
                        onClick={() => onRetry(msg.id)}
-                       className={`flex items-center space-x-1 px-2 py-1 rounded transition-colors ml-4 ${
+                       className={`flex items-center space-x-1 px-2 py-1 rounded transition-colors ml-4 flex-shrink-0 ${
                          isLight
                            ? 'text-indigo-600 hover:bg-indigo-50'
                            : 'text-indigo-400 hover:bg-indigo-900/20'

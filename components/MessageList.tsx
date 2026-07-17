@@ -1,22 +1,22 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Message, AspectRatio } from '../types';
-import { User, Sparkles, CheckCircle2, Circle, AlertTriangle, Loader2, ChevronDown, ChevronUp, MessageSquare, RotateCcw, RefreshCcw, Trash2, Download } from 'lucide-react';
+import { User, Sparkles, CheckCircle2, Circle, AlertTriangle, Loader2, ChevronDown, ChevronUp, MessageSquare, RotateCcw, RefreshCcw, Trash2, Download, Copy, Ban } from 'lucide-react';
 import ImagePreviewModal from './ImagePreviewModal';
+import { getGenerationSlotProgress, getMessageGenerationSlots } from '../core/generationSlots';
 
 interface MessageListProps {
   messages: Message[];
   isGenerating: boolean;
-  progress: { current: number, total: number } | null;
   onSelectImage: (messageId: string, imageId: string) => void;
   onRetry?: (messageId: string) => void;
+  onRetrySlot?: (messageId: string, slotId: string) => void;
   onRegenerate?: (messageId: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   theme: 'light' | 'dark';
-  currentGeneratingMessageId?: string;
-  activeGenerations: Record<string, { progress: { current: number; total: number } }>;
+  activeGenerations: Record<string, { slotIds: string[] }>;
 }
 
-const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progress, onSelectImage, onRetry, onRegenerate, onDeleteMessage, theme, currentGeneratingMessageId, activeGenerations }) => {
+const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, onSelectImage, onRetry, onRetrySlot, onRegenerate, onDeleteMessage, theme, activeGenerations }) => {
   const isLight = theme === 'light';
   const bottomRef = useRef<HTMLDivElement>(null);
   
@@ -29,7 +29,7 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
     if (isGenerating || messages.length > 0) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages.length, isGenerating, progress?.current]);
+  }, [messages, isGenerating]);
 
   const toggleTextExpansion = useCallback((id: string) => {
     setExpandedTextId((prev) => (prev === id ? null : id));
@@ -83,11 +83,10 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
     () => (count: number) => {
       if (count === 0) return 'hidden';
       if (count === 1) return 'grid-cols-1 max-w-sm';
-      if (count === 2) return 'grid-cols-2 max-w-2xl';
-      if (count <= 4) return 'grid-cols-2 max-w-2xl';
-      if (count <= 6) return 'grid-cols-2 sm:grid-cols-3';
-      if (count <= 9) return 'grid-cols-2 sm:grid-cols-3';
-      return 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5';
+      if (count === 2) return 'grid-cols-1 sm:grid-cols-2 max-w-2xl';
+      if (count <= 4) return 'grid-cols-1 sm:grid-cols-2 max-w-2xl';
+      if (count <= 9) return 'grid-cols-1 sm:grid-cols-3';
+      return 'grid-cols-1 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5';
     },
     []
   );
@@ -161,7 +160,7 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
             </div>
 
             {/* Content */}
-            <div className={`flex flex-col space-y-3 ${msg.role === 'user' ? 'items-end' : 'items-start'} w-full`}>
+            <div className={`flex flex-1 min-w-0 flex-col space-y-3 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
               
               {/* User Uploaded Images */}
               {msg.role === 'user' && msg.uploadedImages && msg.uploadedImages.length > 0 && (
@@ -289,39 +288,140 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
               )}
 
               {/* Image Grid (Model only) */}
-              {msg.role === 'model' && msg.images && (() => {
-                const active = activeGenerations[msg.id];
-                const totalExpected = active?.progress.total ?? msg.images.length;
-                const doneCount = msg.images.length;
-                const pendingCount = active ? Math.max(0, totalExpected - doneCount) : 0;
-                const gridCount = Math.max(doneCount, active ? totalExpected : doneCount);
+              {msg.role === 'model' && (() => {
+                const slots = [...getMessageGenerationSlots(msg)].sort((a, b) => a.index - b.index);
+                if (slots.length === 0) return null;
+                const slotProgress = getGenerationSlotProgress(slots);
+                const gridCount = slots.length;
                 return (
                 <div className="w-full">
                   <div className={`grid gap-4 ${getGridClass(gridCount)}`}>
-                    {msg.images.map((img, imgIndex) => {
+                    {slots.map((slot) => {
+                      const imgIndex = slot.index;
+                      const previewAlt = `生成图片 ${imgIndex + 1}`;
+
+                      if (slot.status === 'pending') {
+                        return (
+                          <div
+                            key={slot.slotId}
+                            style={getAspectRatioStyle(msg.generationSettings?.aspectRatio)}
+                            className={`relative w-full rounded-2xl overflow-hidden border-2 border-dashed flex flex-col items-center justify-center ${
+                              isLight
+                                ? 'bg-indigo-50 border-indigo-200'
+                                : 'bg-indigo-950/30 border-indigo-800/60'
+                            }`}
+                            aria-label={`图 ${imgIndex + 1} 正在生成`}
+                          >
+                            <Loader2 size={30} className="animate-spin text-indigo-500" />
+                            <span className={`mt-2 text-xs font-medium ${
+                              isLight ? 'text-indigo-700' : 'text-indigo-300'
+                            }`}>
+                              图 {imgIndex + 1} 生成中
+                            </span>
+                          </div>
+                        );
+                      }
+
+                      if (slot.status === 'failed') {
+                        const errorBadge = slot.error.statusCode
+                          ? `HTTP ${slot.error.statusCode}`
+                          : slot.error.kind.toUpperCase();
+                        return (
+                          <div
+                            key={slot.slotId}
+                            style={getAspectRatioStyle(msg.generationSettings?.aspectRatio)}
+                            className={`relative w-full rounded-2xl border-2 flex flex-col p-4 overflow-hidden ${
+                              isLight
+                                ? 'bg-red-50 border-red-300 text-red-950'
+                                : 'bg-red-950/25 border-red-800/80 text-red-100'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <AlertTriangle size={18} className="text-red-500 flex-shrink-0" />
+                                <span className="text-sm font-semibold">图 {imgIndex + 1} 生成失败</span>
+                              </div>
+                              <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded border ${
+                                isLight
+                                  ? 'bg-white border-red-200 text-red-700'
+                                  : 'bg-red-950/70 border-red-800 text-red-300'
+                              }`}>
+                                {errorBadge}
+                              </span>
+                            </div>
+                            <div className={`mt-3 flex-1 min-h-0 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-5 ${
+                              isLight ? 'text-red-800' : 'text-red-200'
+                            }`}>
+                              {slot.error.message}
+                            </div>
+                            <div className="mt-3 flex items-center justify-between gap-2">
+                              <span className={`text-[10px] ${isLight ? 'text-red-600' : 'text-red-400'}`}>
+                                已尝试 {slot.error.attempts} 次
+                              </span>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => void navigator.clipboard.writeText(slot.error.message)}
+                                  className={`p-1.5 rounded transition-colors ${
+                                    isLight ? 'hover:bg-red-100 text-red-700' : 'hover:bg-red-900/50 text-red-300'
+                                  }`}
+                                  title="复制错误详情"
+                                  aria-label="复制错误详情"
+                                >
+                                  <Copy size={14} />
+                                </button>
+                                {onRetrySlot && !activeGenerations[msg.id] && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onRetrySlot(msg.id, slot.slotId)}
+                                    className={`p-1.5 rounded transition-colors ${
+                                      isLight ? 'hover:bg-red-100 text-red-700' : 'hover:bg-red-900/50 text-red-300'
+                                    }`}
+                                    title="重试此图"
+                                    aria-label={`重试图 ${imgIndex + 1}`}
+                                  >
+                                    <RotateCcw size={14} />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (slot.status === 'cancelled') {
+                        return (
+                          <div
+                            key={slot.slotId}
+                            style={getAspectRatioStyle(msg.generationSettings?.aspectRatio)}
+                            className={`w-full rounded-2xl border-2 border-dashed flex flex-col items-center justify-center p-4 ${
+                              isLight
+                                ? 'bg-gray-100 border-gray-300 text-gray-600'
+                                : 'bg-zinc-900 border-zinc-700 text-zinc-400'
+                            }`}
+                          >
+                            <Ban size={22} className="mb-2" />
+                            <span className="text-xs font-semibold">图 {imgIndex + 1} 已取消</span>
+                            <span className="mt-1 text-[10px] text-center opacity-80">{slot.reason}</span>
+                            {onRetrySlot && !activeGenerations[msg.id] && (
+                              <button
+                                type="button"
+                                onClick={() => onRetrySlot(msg.id, slot.slotId)}
+                                className="mt-3 p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5"
+                                title="重试此图"
+                                aria-label={`重试图 ${imgIndex + 1}`}
+                              >
+                                <RotateCcw size={14} />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      const img = slot.image;
                       const isSelected = msg.selectedImageId === img.id;
                       const hasSelection = !!msg.selectedImageId;
                       const isDiscarded = hasSelection && !isSelected;
-                      const previewAlt = `生成图片 ${imgIndex + 1}`;
-
-                      // Error Tile
-                      if (img.status === 'error') {
-                          return (
-                            <div 
-                                key={img.id}
-                                style={getAspectRatioStyle(msg.generationSettings?.aspectRatio)}
-                                className={`w-full rounded-xl border border-dashed flex flex-col items-center justify-center p-4 ${
-                                  isLight
-                                    ? 'bg-gray-100 border-gray-300 text-gray-500'
-                                    : 'bg-zinc-900 border-zinc-800 text-zinc-600'
-                                }`}
-                            >
-                                <AlertTriangle size={24} className="mb-2 opacity-50 text-amber-500" />
-                                <span className="text-xs text-center font-medium">Failed</span>
-                            </div>
-                          );
-                      }
-
                       return (
                         <div 
                           key={img.id} 
@@ -422,57 +522,25 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                       );
                     })}
 
-                    {/* Pending placeholders for images still being generated */}
-                    {pendingCount > 0 && Array.from({ length: pendingCount }).map((_, idx) => {
-                      const slotIndex = doneCount + idx + 1;
-                      return (
-                        <div
-                          key={`pending-${msg.id}-${idx}`}
-                          style={getAspectRatioStyle(msg.generationSettings?.aspectRatio)}
-                          className={`
-                            relative w-full rounded-2xl overflow-hidden border-2 border-dashed
-                            flex flex-col items-center justify-center
-                            animate-pulse
-                            ${isLight
-                              ? 'bg-gradient-to-br from-indigo-50 to-purple-50 border-indigo-200'
-                              : 'bg-gradient-to-br from-indigo-950/40 to-purple-950/40 border-indigo-800/50'}
-                          `}
-                          aria-label={`图 ${slotIndex} 正在生成`}
-                        >
-                          <div className="flex flex-col items-center gap-2">
-                            <Loader2
-                              size={32}
-                              className={`animate-spin ${isLight ? 'text-indigo-500' : 'text-indigo-400'}`}
-                            />
-                            <span className={`text-xs font-medium ${
-                              isLight ? 'text-indigo-600' : 'text-indigo-300'
-                            }`}>
-                              图 {slotIndex} 生成中
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
                   </div>
 
-                  {msg.images.length > 0 && (
-                      <div className={`mt-4 flex items-center justify-between px-1 ${
+                  <div className={`mt-4 flex flex-wrap items-center justify-between gap-3 px-1 ${
                         isLight ? 'text-gray-500' : 'text-zinc-400'
                       }`}>
                         <div className="flex items-center space-x-2.5">
                           <div className={`
                             w-2 h-2 rounded-full transition-all duration-300
-                            ${activeGenerations[msg.id] && !msg.selectedImageId
+                            ${slotProgress.pending > 0
                               ? 'bg-indigo-500 animate-pulse shadow-lg shadow-indigo-500/50'
                               : (isLight ? 'bg-gray-400' : 'bg-zinc-600')
                             }
                           `}></div>
                           <span className="text-sm font-medium">
-                          {msg.selectedImageId
-                              ? `已选中 1 张图片，共生成 ${msg.images.length} 张`
-                              : activeGenerations[msg.id]
-                                  ? `正在生成... 已完成 ${msg.images.length} 张`
-                                  : `已生成 ${msg.images.length} 张图片`}
+                            已完成 {slotProgress.completed}/{slotProgress.total}
+                            {' · '}{slotProgress.succeeded} 成功
+                            {' · '}{slotProgress.failed} 失败
+                            {slotProgress.cancelled > 0 && ` · ${slotProgress.cancelled} 取消`}
+                            {msg.selectedImageId && ' · 已选中 1 张'}
                           </span>
                         </div>
 
@@ -516,13 +584,12 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                           </div>
                         )}
                       </div>
-                  )}
                 </div>
                 );
               })()}
 
               {/* Error State - only show if no images and an error flag is present */}
-              {msg.isError && (!msg.images || msg.images.length === 0) && (
+              {msg.isError && getMessageGenerationSlots(msg).length === 0 && (
                  <div className={`flex items-start justify-between px-3 py-2 rounded-lg text-sm ${
                    isLight
                      ? 'text-red-600 bg-red-50 border border-red-200'
@@ -552,31 +619,6 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, progr
                  </div>
               )}
 
-              {/* Per-message progress indicator */}
-              {activeGenerations[msg.id] && (
-                <div className={`mt-3 flex items-center space-x-3 px-3 py-2 rounded-lg border ${
-                  isLight
-                    ? 'bg-indigo-50 border-indigo-200'
-                    : 'bg-indigo-900/20 border-indigo-800'
-                }`}>
-                  <Loader2 size={14} className="animate-spin text-indigo-500" />
-                  <span className={`text-xs font-medium ${
-                    isLight ? 'text-indigo-700' : 'text-indigo-300'
-                  }`}>
-                    正在生成... ({activeGenerations[msg.id].progress.current}/{activeGenerations[msg.id].progress.total})
-                  </span>
-                  <div className={`flex-1 h-1 rounded-full overflow-hidden ${
-                    isLight ? 'bg-indigo-200' : 'bg-indigo-950'
-                  }`}>
-                    <div
-                      className="h-full bg-indigo-500 transition-all duration-300 ease-out"
-                      style={{
-                        width: `${(activeGenerations[msg.id].progress.current / activeGenerations[msg.id].progress.total) * 100}%`
-                      }}
-                    ></div>
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         </div>

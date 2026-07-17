@@ -11,8 +11,10 @@ import {
   maybeCleanupStorage,
   touchImageAccess,
   getStorageEstimate,
+  clearAllSessionData,
   BACKGROUND_CLEANUP_THRESHOLD_BYTES
 } from '../utils/indexedDb';
+import { getSuccessfulImages } from '../core/generationSlots';
 
 const LEGACY_STORAGE_KEY = 'banana-batch-sessions';
 const LEGACY_CURRENT_SESSION_KEY = 'banana-batch-current-session';
@@ -103,9 +105,11 @@ export function useSessionState() {
   const currentSessionId = state.currentSessionId;
   const cleanupScheduledRef = useRef<number | null>(null);
   const cleanupInFlightRef = useRef(false);
+  const clearAllInFlightRef = useRef(false);
   const sessionsRef = useRef<Session[]>(sessions);
   const prevSessionsRef = useRef<Session[]>([]);
   const hasHydratedRef = useRef(false);
+  const [storageRevision, setStorageRevision] = useState(0);
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -115,7 +119,7 @@ export function useSessionState() {
     const imageIds = sessions
       .flatMap((session) => session.messages)
       .flatMap((message) => [
-        ...(message.images?.map((image) => image.id) ?? []),
+        ...getSuccessfulImages(message).map((image) => image.id),
         ...(message.uploadedImages?.map((image) => image.id) ?? [])
       ]);
 
@@ -147,6 +151,7 @@ export function useSessionState() {
       const prev = prevSessionsRef.current;
       const current = sessions;
       prevSessionsRef.current = current;
+      let didMutateStorage = false;
 
       const prevMap = new Map<string, Session>(prev.map((session) => [session.id, session]));
       const currentMap = new Map<string, Session>(current.map((session) => [session.id, session]));
@@ -156,6 +161,7 @@ export function useSessionState() {
         if (!previous || previous.updatedAt !== session.updatedAt) {
           try {
             await putSession(session);
+            didMutateStorage = true;
           } catch (error) {
             if (import.meta.env.DEV) {
               console.error('Failed to persist session:', error);
@@ -168,6 +174,7 @@ export function useSessionState() {
         if (!currentMap.has(session.id)) {
           try {
             await deleteSessionById(session.id);
+            didMutateStorage = true;
           } catch (error) {
             if (import.meta.env.DEV) {
               console.error('Failed to delete session from DB:', error);
@@ -175,9 +182,13 @@ export function useSessionState() {
           }
         }
       }
+
+      if (didMutateStorage) {
+        setStorageRevision((revision) => revision + 1);
+      }
     };
 
-    if (hasHydratedRef.current) {
+    if (hasHydratedRef.current && !clearAllInFlightRef.current) {
       void persist();
     }
   }, [sessions]);
@@ -198,16 +209,19 @@ export function useSessionState() {
       cleanupInFlightRef.current = true;
 
       try {
-        await maybeCleanupStorage();
+        const cleanupResult = await maybeCleanupStorage();
 
         const refreshedSessions = await getAllSessions();
-        if (refreshedSessions.length > 0) {
+        if (!clearAllInFlightRef.current && refreshedSessions.length > 0) {
           setState((prev) => ({
             sessions: refreshedSessions,
             currentSessionId: refreshedSessions.some((session) => session.id === prev.currentSessionId)
               ? prev.currentSessionId
               : refreshedSessions[0].id
           }));
+        }
+        if (cleanupResult.deletedImageIds.length > 0) {
+          setStorageRevision((revision) => revision + 1);
         }
       } finally {
         cleanupInFlightRef.current = false;
@@ -378,43 +392,38 @@ export function useSessionState() {
     [setSessions]
   );
 
-  const clearCurrentSession = useCallback(() => {
-    setSessions(prev =>
-      prev.map(session =>
-        session.id === currentSessionId
-          ? { ...session, messages: [], updatedAt: Date.now() }
-          : session
-      )
-    );
-  }, [currentSessionId, setSessions]);
-
-  const cleanupCache = useCallback(async () => {
-    if (cleanupInFlightRef.current) {
-      return { mode: 'none' as const, deletedImageIds: [], deletedBytes: 0 };
+  const clearAllSessions = useCallback(async () => {
+    if (clearAllInFlightRef.current) {
+      return { deletedSessionCount: 0, deletedImageCount: 0, deletedBytes: 0 };
     }
 
-    cleanupInFlightRef.current = true;
+    clearAllInFlightRef.current = true;
     try {
-      const result = await maybeCleanupStorage();
-      const refreshedSessions = await getAllSessions();
-
-      if (refreshedSessions.length > 0) {
-        setState((prev) => ({
-          sessions: refreshedSessions,
-          currentSessionId: refreshedSessions.some((session) => session.id === prev.currentSessionId)
-            ? prev.currentSessionId
-            : refreshedSessions[0].id
-        }));
+      if (cleanupScheduledRef.current !== null) {
+        window.clearTimeout(cleanupScheduledRef.current);
+        cleanupScheduledRef.current = null;
       }
 
-      return result;
+      const deletedSessionCount = sessionsRef.current.length;
+      const emptySession = createNewSession();
+      const result = await clearAllSessionData(emptySession);
+      const nextSessions = [emptySession];
+
+      prevSessionsRef.current = nextSessions;
+      sessionsRef.current = nextSessions;
+      setState({ sessions: nextSessions, currentSessionId: emptySession.id });
+      clearLegacyStorage();
+      setStorageRevision((revision) => revision + 1);
+
+      return { deletedSessionCount, ...result };
     } finally {
-      cleanupInFlightRef.current = false;
+      clearAllInFlightRef.current = false;
     }
   }, []);
 
   return {
     sessions,
+    storageRevision,
     currentSessionId,
     getCurrentSession,
     getLatestSessionMessages,
@@ -424,7 +433,6 @@ export function useSessionState() {
     updateSessionTitle,
     updateSessionMessages,
     updateSessionMessagesById,
-    clearCurrentSession,
-    cleanupCache
+    clearAllSessions
   };
 }

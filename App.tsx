@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Banana } from 'lucide-react';
-import { Message, UploadedImage } from './types';
+import { Message, UploadedImage, GenerationSlotResult } from './types';
 import { generateUUID } from './utils/uuid';
 import { getUserErrorMessage } from './utils/errorHandler';
 import { useSessionState } from './hooks/useSessionState';
@@ -14,11 +14,19 @@ import InputArea from './components/InputArea';
 import SettingsPanel from './components/SettingsPanel';
 import SessionList from './components/SessionList';
 import ErrorBoundary from './components/ErrorBoundary';
+import {
+  applyGenerationSlotResult,
+  createPendingGenerationSlots,
+  getMessageGenerationSlots,
+  markGenerationSlotPending,
+  toSlotDescriptors
+} from './core/generationSlots';
 
 const App: React.FC = () => {
   // Session management
   const {
     sessions,
+    storageRevision,
     currentSessionId,
     getCurrentSession,
     getLatestSessionMessages,
@@ -27,8 +35,7 @@ const App: React.FC = () => {
     deleteSession,
     updateSessionTitle,
     updateSessionMessagesById,
-    clearCurrentSession,
-    cleanupCache
+    clearAllSessions
   } = useSessionState();
 
   const {
@@ -49,6 +56,7 @@ const App: React.FC = () => {
   const { theme, setTheme } = useTheme();
   const [prefillRequest, setPrefillRequest] = useState<{ text: string; images?: UploadedImage[] } | null>(null);
   const [storageUsage, setStorageUsage] = useState<AppStorageEstimate | null>(null);
+  const [isClearingData, setIsClearingData] = useState(false);
   const currentSession = getCurrentSession();
   const messages = currentSession?.messages ?? [];
 
@@ -60,12 +68,14 @@ const App: React.FC = () => {
     void getStorageEstimate().then(setStorageUsage).catch(() => {
       setStorageUsage(null);
     });
-  }, [sessions]);
+  }, [storageRevision]);
 
-  const refreshStorageUsage = useCallback(() => {
-    void getStorageEstimate().then(setStorageUsage).catch(() => {
+  const refreshStorageUsage = useCallback(async () => {
+    try {
+      setStorageUsage(await getStorageEstimate());
+    } catch {
       setStorageUsage(null);
-    });
+    }
   }, []);
 
   // Sync provider config to settings when it changes
@@ -89,13 +99,20 @@ const App: React.FC = () => {
     [updateSessionMessagesById]
   );
 
-  const addImageToMessageInSession = useCallback(
-    (sessionId: string, messageId: string, image: import('./types').GeneratedImage) => {
+  const applySlotResultToMessage = useCallback(
+    (sessionId: string, messageId: string, result: GenerationSlotResult) => {
       updateSessionMessagesById(sessionId, (prev) =>
         prev.map((msg) => {
           if (msg.id === messageId) {
-            const updatedImages = [...(msg.images || []), image];
-            return { ...msg, images: updatedImages };
+            return {
+              ...msg,
+              generationSlots: applyGenerationSlotResult(
+                getMessageGenerationSlots(msg),
+                result
+              ),
+              images: undefined,
+              isError: false
+            };
           }
           return msg;
         })
@@ -159,11 +176,11 @@ const App: React.FC = () => {
   );
 
   // Image generation callbacks
-  const handleImageGenerated = useCallback(
-    (sessionId: string, messageId: string, image: import('./types').GeneratedImage) => {
-      addImageToMessageInSession(sessionId, messageId, image);
+  const handleSlotResult = useCallback(
+    (sessionId: string, messageId: string, result: GenerationSlotResult) => {
+      applySlotResultToMessage(sessionId, messageId, result);
     },
-    [addImageToMessageInSession]
+    [applySlotResultToMessage]
   );
 
   const handleTextGenerated = useCallback(
@@ -173,28 +190,15 @@ const App: React.FC = () => {
     [addTextToMessageInSession]
   );
 
-  const handleGenerationError = useCallback(
-    (sessionId: string, messageId: string, error: Error) => {
-      const userMessage = getUserErrorMessage(error);
-      updateMessageInSession(sessionId, messageId, {
-        isError: true,
-        text: userMessage
-      });
-    },
-    [updateMessageInSession]
-  );
-
-  const { generationStates, generateImages, retryGeneration, stopGeneration } =
+  const { generationStates, generateImages, retrySlots, stopGeneration } =
     useImageGeneration({
-      onImageGenerated: handleImageGenerated,
+      onSlotResult: handleSlotResult,
       onTextGenerated: handleTextGenerated,
-      onError: handleGenerationError,
       getLatestMessages
     });
 
   const currentGenerationState = generationStates[currentSessionId] || {
     isGenerating: false,
-    progress: null,
     currentMessageId: undefined,
     activeGenerations: {}
   };
@@ -216,14 +220,16 @@ const App: React.FC = () => {
 
       // Create model message placeholder
       const modelMsgId = generateUUID();
+      const slots = createPendingGenerationSlots(settings.batchSize);
       const modelMsg: Message = {
         id: modelMsgId,
         role: 'model',
         text: undefined,
         textVariations: [],
-        images: [],
+        generationSlots: slots,
         generationSettings: {
-          aspectRatio: settings.aspectRatio
+          aspectRatio: settings.aspectRatio,
+          resolution: settings.resolution
         },
         timestamp: Date.now()
       };
@@ -232,7 +238,14 @@ const App: React.FC = () => {
       addMessagesToSession(sessionId, [userMsg, modelMsg]);
 
       // Start generation
-      await generateImages(sessionId, text || '', settings, modelMsgId, images);
+      await generateImages(
+        sessionId,
+        text || '',
+        settings,
+        modelMsgId,
+        toSlotDescriptors(slots),
+        images
+      );
     },
     [currentSessionId, settings, addMessagesToSession, generateImages]
   );
@@ -262,30 +275,65 @@ const App: React.FC = () => {
     [getLatestMessages]
   );
 
-  // Handle retry
-  const handleRetry = useCallback(
+  const handleGenerateMore = useCallback(
     async (modelMessageId: string) => {
-      // Remove the concurrent generation check - allow multiple generations
       const sessionId = currentSessionId;
 
       const resolved = resolveMessagePair(sessionId, modelMessageId);
       if (!resolved) return;
 
       const { userMsg, modelMsg, history } = resolved;
+      const existingSlots = getMessageGenerationSlots(modelMsg);
+      const nextIndex = existingSlots.reduce(
+        (maximum, slot) => Math.max(maximum, slot.index + 1),
+        0
+      );
+      const slots = createPendingGenerationSlots(settings.batchSize, nextIndex);
 
-      // Start retry generation
-      const currentImageCount = modelMsg.images?.length || 0;
-      await retryGeneration(
+      updateMessageInSession(sessionId, modelMessageId, {
+        generationSlots: [...existingSlots, ...slots],
+        images: undefined
+      });
+
+      await retrySlots(
         sessionId,
         userMsg.text || '',
         history,
         settings,
         modelMessageId,
-        currentImageCount,
+        toSlotDescriptors(slots),
         userMsg.uploadedImages
       );
     },
-    [currentSessionId, settings, resolveMessagePair, retryGeneration]
+    [currentSessionId, settings, resolveMessagePair, retrySlots, updateMessageInSession]
+  );
+
+  const handleRetrySlot = useCallback(
+    async (modelMessageId: string, slotId: string) => {
+      const sessionId = currentSessionId;
+      const resolved = resolveMessagePair(sessionId, modelMessageId);
+      if (!resolved) return;
+
+      const slots = getMessageGenerationSlots(resolved.modelMsg);
+      const target = slots.find((slot) => slot.slotId === slotId);
+      if (!target || target.status === 'success' || target.status === 'pending') return;
+
+      updateMessageInSession(sessionId, modelMessageId, {
+        generationSlots: markGenerationSlotPending(slots, slotId),
+        images: undefined
+      });
+
+      await retrySlots(
+        sessionId,
+        resolved.userMsg.text || '',
+        resolved.history,
+        { ...settings, batchSize: 1 },
+        modelMessageId,
+        [{ slotId: target.slotId, index: target.index }],
+        resolved.userMsg.uploadedImages
+      );
+    },
+    [currentSessionId, resolveMessagePair, retrySlots, settings, updateMessageInSession]
   );
 
   const handleRegenerate = useCallback(
@@ -320,13 +368,29 @@ const App: React.FC = () => {
     [currentSessionId, deleteMessagesFromSession]
   );
 
-  // Handle clear current session
-  const handleClearAll = useCallback(() => {
-    if (currentGenerationState.isGenerating) {
-      stopGeneration(currentSessionId);
+  const handleClearAllData = useCallback(async () => {
+    setIsClearingData(true);
+    try {
+      for (const sessionId of Object.keys(generationStates)) {
+        if (generationStates[sessionId]?.isGenerating) {
+          stopGeneration(sessionId);
+        }
+      }
+
+      const result = await clearAllSessions();
+      setPrefillRequest(null);
+      await refreshStorageUsage();
+
+      const released = (result.deletedBytes / (1024 * 1024)).toFixed(1);
+      alert(
+        `已清空 ${result.deletedSessionCount} 个会话和 ${result.deletedImageCount} 张缓存图片，释放约 ${released} MB。`
+      );
+    } catch (error) {
+      alert(`清空失败：${getUserErrorMessage(error)}`);
+    } finally {
+      setIsClearingData(false);
     }
-    clearCurrentSession();
-  }, [currentGenerationState.isGenerating, currentSessionId, stopGeneration, clearCurrentSession]);
+  }, [generationStates, stopGeneration, clearAllSessions, refreshStorageUsage]);
 
   const handleCreateSession = useCallback(() => {
     createSession();
@@ -351,19 +415,6 @@ const App: React.FC = () => {
     },
     [updateApiKey]
   );
-
-  const handleCleanupCache = useCallback(async () => {
-    const result = await cleanupCache();
-    refreshStorageUsage();
-
-    if (result.mode === 'none') {
-      alert('当前缓存未达到清理条件，暂无可清理图片。');
-      return;
-    }
-
-    const deletedMB = (result.deletedBytes / (1024 * 1024)).toFixed(1);
-    alert(`缓存清理完成：已清理 ${result.deletedImageIds.length} 张图片，释放约 ${deletedMB} MB。`);
-  }, [cleanupCache, refreshStorageUsage]);
 
   return (
     <ErrorBoundary>
@@ -412,9 +463,8 @@ const App: React.FC = () => {
             onModelChange={updateModel}
             theme={theme}
             onThemeChange={setTheme}
-            onClearAll={handleClearAll}
-            onCleanupCache={handleCleanupCache}
-            hasMessages={messages.length > 0}
+            onClearAllData={handleClearAllData}
+            isClearingData={isClearingData}
             messages={messages}
             storageUsage={storageUsage}
             onImportMessages={(importedMessages) => {
@@ -446,13 +496,12 @@ const App: React.FC = () => {
             <MessageList
               messages={messages}
               isGenerating={currentGenerationState.isGenerating}
-              progress={currentGenerationState.progress}
               onSelectImage={handleSelectImage}
-              onRetry={handleRetry}
+              onRetry={handleGenerateMore}
+              onRetrySlot={handleRetrySlot}
               onRegenerate={handleRegenerate}
               onDeleteMessage={handleDeleteMessages}
               theme={theme}
-              currentGeneratingMessageId={currentGenerationState.currentMessageId}
               activeGenerations={currentGenerationState.activeGenerations || {}}
             />
 

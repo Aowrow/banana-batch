@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test": "node --experimental-transform-types --test core/*.test.ts",
     "dev": "vite",
     "build": "vite build",
     "build:gh-pages": "VITE_BASE_PATH=/banana-batch/ vite build",

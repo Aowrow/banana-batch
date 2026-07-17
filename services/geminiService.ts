@@ -1,13 +1,21 @@
 import { GoogleGenAI, Content, Part } from "@google/genai";
-import { Message, GeneratedImage, AppSettings, UploadedImage } from "../types";
+import {
+  Message,
+  GeneratedImage,
+  AppSettings,
+  UploadedImage,
+  GenerationSlotDescriptor,
+  GenerationSlotResult
+} from "../types";
 import { generateUUID } from "../utils/uuid";
-import { logError } from "../utils/errorHandler";
+import { logError, serializeGenerationError } from "../utils/errorHandler";
 import {
   validateApiKey,
   validatePrompt,
   VALIDATION_LIMITS
 } from "../utils/validation";
 import { ImageProcessingError, SafetyFilterError, ValidationError } from "../types/errors";
+import { getSuccessfulImages } from "../core/generationSlots";
 
 const MODEL_PRO = 'gemini-3-pro-image-preview';
 const MAX_CONCURRENT_REQUESTS = 10;
@@ -53,11 +61,11 @@ function collectSelectedImages(messages: Message[]): ImageInput[] {
   const selectedImages: ImageInput[] = [];
 
   for (const msg of messages) {
-    if (msg.role !== 'model' || !msg.selectedImageId || !msg.images) {
+    if (msg.role !== 'model' || !msg.selectedImageId) {
       continue;
     }
 
-    const selectedImg = msg.images.find((img) => img.id === msg.selectedImageId);
+    const selectedImg = getSuccessfulImages(msg).find((img) => img.id === msg.selectedImageId);
     if (!selectedImg || selectedImg.status !== 'success') {
       continue;
     }
@@ -174,9 +182,8 @@ function delay(ms: number): Promise<void> {
 }
 
 export interface StreamCallbacks {
-  onImage: (image: GeneratedImage) => void;
+  onSlotResult: (result: GenerationSlotResult) => void;
   onText: (text: string) => void;
-  onProgress: (completed: number, total: number) => void;
 }
 
 /**
@@ -189,6 +196,7 @@ export async function generateImageBatchStream(
   history: Message[],
   settings: AppSettings,
   uploadedImages: UploadedImage[] | undefined,
+  slots: GenerationSlotDescriptor[],
   callbacks: StreamCallbacks,
   signal: AbortSignal
 ): Promise<void> {
@@ -346,8 +354,7 @@ ${prompt}`;
   const config = Object.keys(imageConfig).length > 0 ? { imageConfig } : undefined;
 
   // Shared task queue
-  const taskQueue = Array.from({ length: settings.batchSize }, (_, i) => i);
-  let completedCount = 0;
+  const taskQueue = Array.from({ length: slots.length }, (_, i) => i);
 
   // Worker function
   const worker = async (workerId: number): Promise<void> => {
@@ -360,6 +367,7 @@ ${prompt}`;
 
       let attempt = 0;
       let success = false;
+      let lastError: unknown = null;
 
       while (attempt <= MAX_RETRIES && !success) {
         if (signal.aborted) return; // Check abort inside retry loop
@@ -402,31 +410,36 @@ ${prompt}`;
             throw new ImageProcessingError('No content parts in response');
           }
 
-          let foundImage = false;
+          let generatedImage: GeneratedImage | undefined;
           for (const part of content.parts as any[]) {
             const inlineData = part.inlineData || part.inline_data;
-            if (inlineData && inlineData.data) {
+            if (inlineData && inlineData.data && !generatedImage) {
               const mimeType = inlineData.mimeType || inlineData.mime_type || 'image/png';
-              const img: GeneratedImage = {
+              generatedImage = {
                 id: generateUUID(),
                 data: `data:${mimeType};base64,${inlineData.data}`,
                 mimeType,
                 status: 'success'
               };
-              callbacks.onImage(img);
-              foundImage = true;
             } else if (part.text) {
               callbacks.onText(part.text);
             }
           }
 
-          if (foundImage) {
+          if (generatedImage) {
             success = true;
+            callbacks.onSlotResult({
+              ...slots[index],
+              status: 'success',
+              attempts: attempt + 1,
+              image: generatedImage
+            });
           } else {
             throw new ImageProcessingError('No image data in response');
           }
         } catch (error) {
           attempt++;
+          lastError = error;
 
           // Only log errors if not aborted
           if (!signal.aborted) {
@@ -434,7 +447,8 @@ ${prompt}`;
           }
 
           // Retry with exponential backoff
-          if (attempt <= MAX_RETRIES && !signal.aborted) {
+          const serialized = serializeGenerationError(error, attempt);
+          if (attempt <= MAX_RETRIES && !signal.aborted && serialized.retryable) {
             const waitTime = 1000 * Math.pow(2, attempt - 1);
             await delay(waitTime);
           }
@@ -443,24 +457,18 @@ ${prompt}`;
 
       // If failed and not aborted, report error image
       if (!success && !signal.aborted) {
-        callbacks.onImage({
-          id: generateUUID(),
-          data: '',
-          mimeType: '',
-          status: 'error'
+        callbacks.onSlotResult({
+          ...slots[index],
+          status: 'failed',
+          attempts: attempt,
+          error: serializeGenerationError(lastError, attempt)
         });
-      }
-
-      // Update progress
-      if (!signal.aborted) {
-        completedCount++;
-        callbacks.onProgress(completedCount, settings.batchSize);
       }
     }
   };
 
   // Start workers
-  const numWorkers = Math.min(MAX_CONCURRENT_REQUESTS, settings.batchSize);
+  const numWorkers = Math.min(MAX_CONCURRENT_REQUESTS, slots.length);
   const workers = Array.from({ length: numWorkers }, (_, i) => worker(i + 1));
 
   await Promise.all(workers);

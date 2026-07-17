@@ -1,13 +1,19 @@
-import { AppSettings, Message, UploadedImage, GeneratedImage, ProviderConfig } from '../types';
+import {
+  AppSettings,
+  Message,
+  UploadedImage,
+  ProviderConfig,
+  GenerationSlotDescriptor,
+  GenerationSlotResult
+} from '../types';
 import { generateImageBatchStream } from '../services/geminiService';
 import { generateImageBatchStreamOpenAI } from '../services/openaiService';
 import { APIKeyError } from '../types/errors';
 import { resolveSettings } from './config';
 
 export interface GenerationCallbacks {
-  onImage: (image: GeneratedImage) => void;
+  onSlotResult: (result: GenerationSlotResult) => void;
   onText: (text: string) => void;
-  onProgress: (current: number, total: number) => void;
 }
 
 export interface GenerationRequest {
@@ -16,6 +22,7 @@ export interface GenerationRequest {
   uploadedImages?: UploadedImage[];
   settings?: Partial<AppSettings>;
   providerConfig?: Partial<ProviderConfig>;
+  slots: GenerationSlotDescriptor[];
   signal: AbortSignal;
   callbacks: GenerationCallbacks;
 }
@@ -40,10 +47,10 @@ export async function runImageGeneration(request: GenerationRequest): Promise<vo
       history,
       settings,
       request.uploadedImages,
+      request.slots,
       {
-        onImage: request.callbacks.onImage,
-        onText: request.callbacks.onText,
-        onProgress: request.callbacks.onProgress
+        onSlotResult: request.callbacks.onSlotResult,
+        onText: request.callbacks.onText
       },
       request.signal
     );
@@ -56,10 +63,10 @@ export async function runImageGeneration(request: GenerationRequest): Promise<vo
     history,
     settings,
     request.uploadedImages,
+    request.slots,
     {
-      onImage: request.callbacks.onImage,
-      onText: request.callbacks.onText,
-      onProgress: request.callbacks.onProgress
+      onSlotResult: request.callbacks.onSlotResult,
+      onText: request.callbacks.onText
     },
     request.signal
   );

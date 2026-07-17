@@ -6,7 +6,8 @@ import {
   ServerError,
   AppError,
   type ErrorType
-} from '../types/errors';
+} from '../types/errors.ts';
+import type { GenerationErrorInfo } from '../types.ts';
 
 /**
  * Extracts HTTP status code from error message
@@ -15,6 +16,114 @@ function extractStatusCode(message: string): number | null {
   // Match patterns like "503", "status 503", "503 Service"
   const match = message.match(/\b(50[0-9]|40[0-9]|[45]\d{2})\b/);
   return match ? parseInt(match[0], 10) : null;
+}
+
+interface ApiErrorDetails {
+  status?: number;
+  code?: string;
+  type?: string;
+  requestId?: string;
+  message: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function extractApiErrorDetails(error: unknown): ApiErrorDetails | null {
+  const record = asRecord(error);
+  if (!record) return null;
+
+  const nestedError = asRecord(record.error);
+  const status = typeof record.status === 'number' ? record.status : undefined;
+  const code = readString(record.code) ?? readString(nestedError?.code);
+  const type = readString(record.type) ?? readString(nestedError?.type);
+  const requestId =
+    readString(record.requestID) ??
+    readString(record.request_id) ??
+    readString(nestedError?.request_id);
+  const message =
+    readString(nestedError?.message) ??
+    readString(record.message) ??
+    (nestedError ? JSON.stringify(nestedError) : 'API request failed');
+
+  if (status === undefined && !code && !type && !requestId && !nestedError) {
+    return null;
+  }
+
+  return { status, code, type, requestId, message };
+}
+
+function formatApiError(details: ApiErrorDetails): string {
+  const metadata = [
+    details.status !== undefined ? `HTTP ${details.status}` : undefined,
+    details.code ? `code=${details.code}` : undefined,
+    details.type ? `type=${details.type}` : undefined,
+    details.requestId ? `request_id=${details.requestId}` : undefined
+  ].filter((value): value is string => Boolean(value));
+
+  return metadata.length > 0
+    ? `${metadata.join(' | ')}\n${details.message}`
+    : details.message;
+}
+
+export function serializeGenerationError(
+  error: unknown,
+  attempts: number
+): GenerationErrorInfo {
+  const apiDetails = extractApiErrorDetails(error);
+  const rawMessage = apiDetails
+    ? formatApiError(apiDetails)
+    : error instanceof Error
+      ? error.message
+      : String(error);
+  const normalized = rawMessage.toLowerCase();
+  const statusCode = apiDetails?.status ?? extractStatusCode(rawMessage) ?? undefined;
+  const code = apiDetails?.code;
+
+  let kind: GenerationErrorInfo['kind'] = 'unknown';
+  if (
+    code === 'moderation_blocked' ||
+    error instanceof SafetyFilterError ||
+    normalized.includes('content blocked') ||
+    normalized.includes('safety filter')
+  ) {
+    kind = 'moderation';
+  } else if (
+    error instanceof NetworkError ||
+    normalized.includes('network') ||
+    normalized.includes('connection') ||
+    normalized.includes('fetch') ||
+    normalized.includes('timeout')
+  ) {
+    kind = 'network';
+  } else if (statusCode === 400 || statusCode === 422) {
+    kind = 'invalid_request';
+  } else if (statusCode !== undefined) {
+    kind = 'http';
+  }
+
+  return {
+    kind,
+    message: rawMessage,
+    statusCode,
+    code,
+    type: apiDetails?.type,
+    requestId: apiDetails?.requestId,
+    attempts,
+    retryable:
+      kind === 'network' ||
+      statusCode === 429 ||
+      (statusCode !== undefined && statusCode >= 500)
+  };
 }
 
 /**
@@ -26,16 +135,35 @@ export function classifyError(error: unknown): ErrorType {
     return error;
   }
 
-  // Convert standard Error to string
-  const errorMessage = error instanceof Error ? error.message : String(error);
+  const apiErrorDetails = extractApiErrorDetails(error);
+  const errorMessage = apiErrorDetails
+    ? formatApiError(apiErrorDetails)
+    : error instanceof Error
+      ? error.message
+      : String(error);
   const errorLower = errorMessage.toLowerCase();
 
   // Extract status code
-  const statusCode = extractStatusCode(errorMessage);
+  const statusCode = apiErrorDetails?.status ?? extractStatusCode(errorMessage);
 
   // Server errors (5xx) - Check first before other patterns
   if (statusCode && statusCode >= 500 && statusCode < 600) {
     return new ServerError(errorMessage, statusCode);
+  }
+
+  // Structured API errors use stable fields from the response. Do not run
+  // fuzzy keyword matching against their server-provided messages.
+  if (apiErrorDetails) {
+    if (statusCode === 401) {
+      return new APIKeyError(errorMessage);
+    }
+
+    if (apiErrorDetails.code === 'moderation_blocked') {
+      return new SafetyFilterError(errorMessage);
+    }
+
+    const code = apiErrorDetails.code || (statusCode ? `HTTP_${statusCode}` : 'API_ERROR');
+    return new AppError(errorMessage, code, '❌ API 请求失败。');
   }
 
   // Explicit server error keywords
@@ -52,13 +180,12 @@ export function classifyError(error: unknown): ErrorType {
     return new ServerError(errorMessage, statusCode || undefined);
   }
 
-  // API Key errors (401, 403)
+  // Authentication errors. A 403 can also mean permissions or region restrictions.
   if (
     errorLower.includes('api key') ||
     errorLower.includes('api_key') ||
     errorLower.includes('unauthorized') ||
-    errorLower.includes('401') ||
-    errorLower.includes('403')
+    statusCode === 401
   ) {
     return new APIKeyError(errorMessage);
   }
@@ -76,6 +203,7 @@ export function classifyError(error: unknown): ErrorType {
 
   // Safety filter errors
   if (
+    apiErrorDetails?.code === 'moderation_blocked' ||
     errorLower.includes('safety') ||
     errorLower.includes('blocked') ||
     errorLower.includes('filter')
@@ -89,6 +217,12 @@ export function classifyError(error: unknown): ErrorType {
     errorLower.includes('base64')
   ) {
     return new ImageProcessingError(errorMessage);
+  }
+
+  // Preserve HTTP failures instead of guessing their cause.
+  if (statusCode) {
+    const code = `HTTP_${statusCode}`;
+    return new AppError(errorMessage, code, '❌ API 请求失败。');
   }
 
   // Generic app error

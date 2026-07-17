@@ -1,7 +1,15 @@
 import OpenAI from 'openai';
-import { Message, GeneratedImage, AppSettings, UploadedImage, AspectRatio, Resolution } from '../types';
+import {
+  Message,
+  GeneratedImage,
+  AppSettings,
+  UploadedImage,
+  AspectRatio,
+  Resolution,
+  GenerationSlotDescriptor
+} from '../types';
 import { generateUUID } from '../utils/uuid';
-import { logError } from '../utils/errorHandler';
+import { logError, serializeGenerationError } from '../utils/errorHandler';
 import {
   validateApiKey,
   validatePrompt,
@@ -13,10 +21,72 @@ import {
   NetworkError
 } from '../types/errors';
 import { StreamCallbacks } from './geminiService';
+import { getSuccessfulImages } from '../core/generationSlots';
 
 const MAX_CONCURRENT_REQUESTS = 10;
 const MAX_RETRIES = 3;
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+class OpenAIHttpError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+    public readonly type?: string,
+    public readonly requestID?: string,
+    public readonly error?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'OpenAIHttpError';
+  }
+}
+
+function isRetryableOpenAIError(error: unknown): boolean {
+  const status = error instanceof OpenAI.APIError
+    ? error.status
+    : error instanceof OpenAIHttpError
+      ? error.status
+      : undefined;
+
+  if (status !== undefined) {
+    return status === 429 || status >= 500;
+  }
+
+  return true;
+}
+
+async function parseOpenAIHttpError(response: Response): Promise<OpenAIHttpError> {
+  const responseText = await response.text();
+  let body: Record<string, unknown> | undefined;
+
+  try {
+    const parsed = JSON.parse(responseText);
+    if (parsed !== null && typeof parsed === 'object') {
+      body = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Some OpenAI-compatible proxies return plain text or HTML errors.
+  }
+
+  const nested = body?.error !== null && typeof body?.error === 'object'
+    ? body.error as Record<string, unknown>
+    : body;
+  const message = typeof nested?.message === 'string'
+    ? nested.message
+    : responseText.trim() || response.statusText || 'API request failed';
+  const code = typeof nested?.code === 'string' ? nested.code : undefined;
+  const type = typeof nested?.type === 'string' ? nested.type : undefined;
+  const requestID = response.headers.get('x-request-id') || undefined;
+
+  return new OpenAIHttpError(
+    message.slice(0, 2000),
+    response.status,
+    code,
+    type,
+    requestID,
+    nested
+  );
+}
 
 /**
  * Extracts base64 data from a data URI safely
@@ -71,7 +141,7 @@ function hasReferenceImages(
     (msg) =>
       msg.role === 'model' &&
       !!msg.selectedImageId &&
-      !!msg.images?.some((img) => img.id === msg.selectedImageId && img.status === 'success')
+      getSuccessfulImages(msg).some((img) => img.id === msg.selectedImageId)
   );
 }
 
@@ -84,6 +154,42 @@ function mapAspectRatioToOpenAISize(
   const useDalleSizes = normalizedModel.includes('dall-e-3');
   const isGptImage2 = normalizedModel.includes('gpt-image-2');
 
+  if (isGptImage2) {
+    if (!aspectRatio || aspectRatio === 'Auto') return 'auto';
+
+    const [width, height] = aspectRatio.split(':').map(Number);
+    if (!width || !height) return 'auto';
+
+    const longToShortRatio = Math.max(width, height) / Math.min(width, height);
+    if (longToShortRatio > 3) return 'auto';
+
+    const isSquare = width === height;
+    const longEdge = resolution === '4K'
+      ? 3840
+      : resolution === '2K'
+        ? 2048
+        : isSquare
+          ? 1024
+          : 1536;
+
+    let outputWidth = width >= height
+      ? longEdge
+      : Math.round((longEdge * width) / height / 16) * 16;
+    let outputHeight = height >= width
+      ? longEdge
+      : Math.round((longEdge * height) / width / 16) * 16;
+
+    const maxPixels = 8_294_400;
+    const totalPixels = outputWidth * outputHeight;
+    if (totalPixels > maxPixels) {
+      const scale = Math.sqrt(maxPixels / totalPixels);
+      outputWidth = Math.floor((outputWidth * scale) / 16) * 16;
+      outputHeight = Math.floor((outputHeight * scale) / 16) * 16;
+    }
+
+    return `${outputWidth}x${outputHeight}`;
+  }
+
   if (!aspectRatio || aspectRatio === 'Auto') {
     return '1024x1024';
   }
@@ -91,35 +197,6 @@ function mapAspectRatioToOpenAISize(
   const [width, height] = aspectRatio.split(':').map(Number);
   if (!width || !height || width === height) {
     return '1024x1024';
-  }
-
-  // gpt-image-2 supports arbitrary resolutions
-  // max edge ≤ 3840px, multiples of 16, aspect ratio ≤ 3:1, total pixels 655360–8294400
-  if (isGptImage2) {
-    const isPortrait = width < height;
-    const aspectValue = width / height;
-    // 1K uses 1536 as base to ensure minimum pixel count for wide ratios
-    const baseSize = resolution === '4K' ? 3840 : resolution === '2K' ? 2048 : 1536;
-
-    let w: number, h: number;
-    if (isPortrait) {
-      h = baseSize;
-      w = Math.round(h * aspectValue);
-    } else {
-      w = baseSize;
-      h = Math.round(w / aspectValue);
-    }
-
-    // Ensure multiples of 16
-    w = Math.round(w / 16) * 16;
-    h = Math.round(h / 16) * 16;
-
-    const totalPixels = w * h;
-    if (totalPixels < 655360 || totalPixels > 8294400) {
-      return isPortrait ? '1024x1536' : '1536x1024';
-    }
-
-    return `${w}x${h}`;
   }
 
   if (width < height) {
@@ -167,11 +244,11 @@ function collectSelectedImages(messages: Message[]): OpenAI.Chat.ChatCompletionC
   const selectedImages: OpenAI.Chat.ChatCompletionContentPart[] = [];
 
   for (const msg of messages) {
-    if (msg.role !== 'model' || !msg.selectedImageId || !msg.images) {
+    if (msg.role !== 'model' || !msg.selectedImageId) {
       continue;
     }
 
-    const selectedImg = msg.images.find((img) => img.id === msg.selectedImageId);
+    const selectedImg = getSuccessfulImages(msg).find((img) => img.id === msg.selectedImageId);
     if (!selectedImg || selectedImg.status !== 'success') {
       continue;
     }
@@ -240,6 +317,7 @@ async function generateImageEditGptImage2(
   history: Message[],
   uploadedImages: UploadedImage[] | undefined,
   settings: AppSettings,
+  slots: GenerationSlotDescriptor[],
   callbacks: StreamCallbacks,
   signal: AbortSignal
 ): Promise<void> {
@@ -265,10 +343,10 @@ async function generateImageEditGptImage2(
 
   // Add selected images from history
   for (const msg of history) {
-    if (msg.role !== 'model' || !msg.selectedImageId || !msg.images) {
+    if (msg.role !== 'model' || !msg.selectedImageId) {
       continue;
     }
-    const selectedImg = msg.images.find((img) => img.id === msg.selectedImageId);
+    const selectedImg = getSuccessfulImages(msg).find((img) => img.id === msg.selectedImageId);
     if (selectedImg && selectedImg.status === 'success') {
       const imageData = extractBase64Data(selectedImg.data);
       if (imageData) {
@@ -298,16 +376,13 @@ async function generateImageEditGptImage2(
 
   // Workaround: Some proxy servers (like newapi.funmz.com) have issues with n>1
   // Generate images one by one if batchSize > 1
-  const shouldUseSingleRequests = settings.batchSize > 1;
-  const actualBatchSize = shouldUseSingleRequests ? 1 : settings.batchSize;
-  const numRequests = shouldUseSingleRequests ? settings.batchSize : 1;
-
-  const allImages: GeneratedImage[] = [];
-  let completed = 0;
+  const actualBatchSize = 1;
+  const numRequests = slots.length;
 
   await Promise.allSettled(
     Array.from({ length: numRequests }, async (_, reqIndex) => {
       if (signal.aborted) return;
+      const descriptor = slots[reqIndex];
 
       let attempt = 0;
       let response: OpenAI.ImagesResponse | null = null;
@@ -353,8 +428,7 @@ async function generateImageEditGptImage2(
           });
 
           if (!fetchResponse.ok) {
-            const errorText = await fetchResponse.text();
-            throw new Error(`HTTP ${fetchResponse.status}: ${errorText.slice(0, 500)}`);
+            throw await parseOpenAIHttpError(fetchResponse);
           }
 
           response = await fetchResponse.json();
@@ -382,9 +456,15 @@ async function generateImageEditGptImage2(
             }
           }
 
-          if (attempt <= MAX_RETRIES && !userAborted) {
+          if (
+            attempt <= MAX_RETRIES &&
+            !userAborted &&
+            isRetryableOpenAIError(error)
+          ) {
             const waitTime = 1000 * Math.pow(2, attempt - 1);
             await delay(waitTime);
+          } else {
+            break;
           }
         } finally {
           clearTimeout(timeoutId);
@@ -393,10 +473,16 @@ async function generateImageEditGptImage2(
       }
 
       if (!response) {
-        const detail = lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error');
-        throw new ImageProcessingError(`Request ${reqIndex + 1} failed. ${detail}`);
+        callbacks.onSlotResult({
+          ...descriptor,
+          status: 'failed',
+          attempts: attempt,
+          error: serializeGenerationError(lastError, attempt)
+        });
+        return;
       }
 
+      let generatedImage: GeneratedImage | undefined;
       for (const item of response.data || []) {
         if (signal.aborted) return;
 
@@ -411,24 +497,34 @@ async function generateImageEditGptImage2(
         }
 
         if (imageData) {
-          const img: GeneratedImage = {
+          generatedImage = {
             id: generateUUID(),
             data: imageData,
             mimeType,
             status: 'success'
           };
-          allImages.push(img);
-          callbacks.onImage(img);
-          completed++;
-          callbacks.onProgress(completed, settings.batchSize);
+          break;
         }
+      }
+
+      if (generatedImage) {
+        callbacks.onSlotResult({
+          ...descriptor,
+          status: 'success',
+          attempts: attempt + 1,
+          image: generatedImage
+        });
+      } else {
+        const error = new ImageProcessingError('The API response did not contain image data.');
+        callbacks.onSlotResult({
+          ...descriptor,
+          status: 'failed',
+          attempts: attempt + 1,
+          error: serializeGenerationError(error, attempt + 1)
+        });
       }
     })
   );
-
-  if (allImages.length === 0) {
-    throw new ImageProcessingError('All image edit requests failed. Please check your configuration and try again.');
-  }
 }
 
 /**
@@ -442,6 +538,7 @@ export async function generateImageBatchStreamOpenAI(
   history: Message[],
   settings: AppSettings,
   uploadedImages: UploadedImage[] | undefined,
+  slots: GenerationSlotDescriptor[],
   callbacks: StreamCallbacks,
   signal: AbortSignal
 ): Promise<void> {
@@ -500,6 +597,7 @@ export async function generateImageBatchStreamOpenAI(
         history,
         uploadedImages,
         settings,
+        slots,
         callbacks,
         signal
       );
@@ -524,9 +622,8 @@ export async function generateImageBatchStreamOpenAI(
 
     // Workaround: Some proxy servers (like gptproto/newapi) have issues with n>1
     // Split into single-image requests when batchSize > 1
-    const shouldUseSingleRequests = settings.batchSize > 1;
-    const perRequestN = shouldUseSingleRequests ? 1 : settings.batchSize;
-    const numRequests = shouldUseSingleRequests ? settings.batchSize : 1;
+    const perRequestN = 1;
+    const numRequests = slots.length;
 
     console.log('[Images API] Request params:', {
       model,
@@ -539,11 +636,10 @@ export async function generateImageBatchStreamOpenAI(
       responseFormat
     });
 
-    let completed = 0;
-
     await Promise.allSettled(
       Array.from({ length: numRequests }, async (_, reqIndex) => {
         if (signal.aborted) return;
+        const descriptor = slots[reqIndex];
 
         let attempt = 0;
         let response: OpenAI.ImagesResponse | null = null;
@@ -557,7 +653,8 @@ export async function generateImageBatchStreamOpenAI(
               model,
               prompt,
               n: perRequestN,
-              size,
+              // The installed SDK types predate gpt-image-2 flexible sizes.
+              size: size as OpenAI.Images.ImageGenerateParams['size'],
               ...(quality ? { quality } : {}),
               response_format: responseFormat
             });
@@ -583,18 +680,30 @@ export async function generateImageBatchStreamOpenAI(
               }
             }
 
-            if (attempt <= MAX_RETRIES && !signal.aborted) {
+            if (
+              attempt <= MAX_RETRIES &&
+              !signal.aborted &&
+              isRetryableOpenAIError(error)
+            ) {
               const waitTime = 1000 * Math.pow(2, attempt - 1);
               await delay(waitTime);
+            } else {
+              break;
             }
           }
         }
 
         if (!response) {
-          const detail = lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error');
-          throw new ImageProcessingError(`Request ${reqIndex + 1} failed. ${detail}`);
+          callbacks.onSlotResult({
+            ...descriptor,
+            status: 'failed',
+            attempts: attempt,
+            error: serializeGenerationError(lastError, attempt)
+          });
+          return;
         }
 
+        let generatedImage: GeneratedImage | undefined;
         for (const item of response.data || []) {
           if (signal.aborted) return;
 
@@ -609,22 +718,34 @@ export async function generateImageBatchStreamOpenAI(
           }
 
           if (imageData) {
-            callbacks.onImage({
+            generatedImage = {
               id: generateUUID(),
               data: imageData,
               mimeType,
               status: 'success'
-            });
-            completed++;
-            callbacks.onProgress(completed, settings.batchSize);
+            };
+            break;
           }
+        }
+
+        if (generatedImage) {
+          callbacks.onSlotResult({
+            ...descriptor,
+            status: 'success',
+            attempts: attempt + 1,
+            image: generatedImage
+          });
+        } else {
+          const error = new ImageProcessingError('The API response did not contain image data.');
+          callbacks.onSlotResult({
+            ...descriptor,
+            status: 'failed',
+            attempts: attempt + 1,
+            error: serializeGenerationError(error, attempt + 1)
+          });
         }
       })
     );
-
-    if (completed === 0) {
-      throw new ImageProcessingError('All image generation requests failed. Please check your configuration and try again.');
-    }
 
     return;
   }
@@ -702,8 +823,7 @@ export async function generateImageBatchStreamOpenAI(
   }
 
   // Shared task queue
-  const taskQueue = Array.from({ length: settings.batchSize }, (_, i) => i);
-  let completedCount = 0;
+  const taskQueue = Array.from({ length: slots.length }, (_, i) => i);
 
   // Worker function
   const worker = async (workerId: number): Promise<void> => {
@@ -712,9 +832,11 @@ export async function generateImageBatchStreamOpenAI(
 
       const index = taskQueue.shift();
       if (index === undefined) break;
+      const descriptor = slots[index];
 
       let attempt = 0;
       let success = false;
+      let lastError: unknown = null;
 
       while (attempt <= MAX_RETRIES && !success) {
         if (signal.aborted) return;
@@ -762,7 +884,7 @@ export async function generateImageBatchStreamOpenAI(
           }
 
           // Extract image and text from response
-          let foundImage = false;
+          let generatedImage: GeneratedImage | undefined;
 
           console.log('[Content Type]', {
             isString: typeof message.content === 'string',
@@ -784,8 +906,7 @@ export async function generateImageBatchStreamOpenAI(
                 mimeType: dataUriMatch[0].split(';')[0].split(':')[1],
                 status: 'success'
               };
-              callbacks.onImage(img);
-              foundImage = true;
+              generatedImage = img;
             } else {
               // Text response - might contain URL or other format
               console.log('[Text response]', message.content);
@@ -798,8 +919,7 @@ export async function generateImageBatchStreamOpenAI(
                   mimeType: inferImageMimeTypeFromUrl(message.content),
                   status: 'success'
                 };
-                callbacks.onImage(img);
-                foundImage = true;
+                generatedImage = img;
               } else {
                 callbacks.onText(message.content);
               }
@@ -823,8 +943,7 @@ export async function generateImageBatchStreamOpenAI(
                       mimeType: imageUrl.split(';')[0].split(':')[1] || 'image/png',
                       status: 'success'
                     };
-                    callbacks.onImage(img);
-                    foundImage = true;
+                    generatedImage = img;
                   }
                 } else if ('text' in part && part.text) {
                   console.log('[Found text part]', part.text);
@@ -834,14 +953,22 @@ export async function generateImageBatchStreamOpenAI(
             }
           }
 
-          if (foundImage) {
+          if (generatedImage) {
             success = true;
+            callbacks.onSlotResult({
+              ...descriptor,
+              status: 'success',
+              attempts: attempt + 1,
+              image: generatedImage
+            });
           } else {
             console.error('[No image found in response]', { message });
             throw new ImageProcessingError('No image data in response');
           }
         } catch (error) {
           attempt++;
+
+          lastError = error;
 
           if (!signal.aborted) {
             // Classify network errors
@@ -863,7 +990,11 @@ export async function generateImageBatchStreamOpenAI(
           }
 
           // Retry with exponential backoff
-          if (attempt <= MAX_RETRIES && !signal.aborted) {
+          if (
+            attempt <= MAX_RETRIES &&
+            !signal.aborted &&
+            serializeGenerationError(error, attempt).retryable
+          ) {
             const waitTime = 1000 * Math.pow(2, attempt - 1);
             await delay(waitTime);
           }
@@ -872,25 +1003,20 @@ export async function generateImageBatchStreamOpenAI(
 
       // If failed and not aborted, report error image
       if (!success && !signal.aborted) {
-        callbacks.onImage({
-          id: generateUUID(),
-          data: '',
-          mimeType: '',
-          status: 'error'
+        callbacks.onSlotResult({
+          ...descriptor,
+          status: 'failed',
+          attempts: attempt,
+          error: serializeGenerationError(lastError, attempt)
         });
-      }
-
-      // Update progress
-      if (!signal.aborted) {
-        completedCount++;
-        callbacks.onProgress(completedCount, settings.batchSize);
       }
     }
   };
 
   // Start workers
-  const numWorkers = Math.min(MAX_CONCURRENT_REQUESTS, settings.batchSize);
+  const numWorkers = Math.min(MAX_CONCURRENT_REQUESTS, slots.length);
   const workers = Array.from({ length: numWorkers }, (_, i) => worker(i + 1));
 
   await Promise.all(workers);
+
 }

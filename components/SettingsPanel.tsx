@@ -1,7 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Layers, Monitor, Square, Key, Sun, Moon, Trash2, Download, Upload } from 'lucide-react';
-import { AppSettings, AspectRatio, Resolution, Message, ProviderConfig, Provider, ASPECT_RATIO_OPTIONS } from '../types';
+import { Layers, Monitor, Square, Key, Sun, Moon, Trash2, Download, Upload, Loader2 } from 'lucide-react';
+import {
+  AppSettings,
+  AspectRatio,
+  Resolution,
+  Message,
+  ProviderConfig,
+  Provider,
+  ASPECT_RATIO_OPTIONS,
+  GPT_IMAGE_ASPECT_RATIO_OPTIONS
+} from '../types';
 import ProviderConfigPanel from './ProviderConfigPanel';
+import { getMessageGenerationSlots, getSuccessfulImages } from '../core/generationSlots';
 
 interface SettingsPanelProps {
   settings: AppSettings;
@@ -13,9 +23,8 @@ interface SettingsPanelProps {
   onModelChange: (model: string) => void;
   theme: 'light' | 'dark';
   onThemeChange: (theme: 'light' | 'dark') => void;
-  onClearAll?: () => void;
-  onCleanupCache?: () => void;
-  hasMessages?: boolean;
+  onClearAllData?: () => void | Promise<void>;
+  isClearingData?: boolean;
   messages?: Message[];
   storageUsage?: { usageBytes: number; budgetBytes: number; usageRatio: number; browserQuotaBytes: number } | null;
   onImportMessages?: (messages: Message[]) => void;
@@ -31,9 +40,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onModelChange,
   theme,
   onThemeChange,
-  onClearAll,
-  onCleanupCache,
-  hasMessages,
+  onClearAllData,
+  isClearingData = false,
   messages,
   storageUsage,
   onImportMessages
@@ -62,26 +70,29 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     // Validate and prepare messages with target results (selected images)
     const validatedMessages = messages.map(msg => {
+      const successfulImages = getSuccessfulImages(msg);
+      const normalizedMessage = msg.role === 'model'
+        ? { ...msg, generationSlots: getMessageGenerationSlots(msg), images: undefined }
+        : msg;
       // For model messages with selected images, ensure the target result is valid
-      if (msg.role === 'model' && msg.selectedImageId && msg.images) {
-        const selectedImage = msg.images.find(img => img.id === msg.selectedImageId);
+      if (msg.role === 'model' && msg.selectedImageId) {
+        const selectedImage = successfulImages.find(img => img.id === msg.selectedImageId);
         if (!selectedImage) {
           console.warn(`Message ${msg.id}: selectedImageId ${msg.selectedImageId} not found in images, clearing selection`);
-          return { ...msg, selectedImageId: undefined };
+          return { ...normalizedMessage, selectedImageId: undefined };
         }
         if (selectedImage.status !== 'success') {
           console.warn(`Message ${msg.id}: selected image has status ${selectedImage.status}, clearing selection`);
-          return { ...msg, selectedImageId: undefined };
+          return { ...normalizedMessage, selectedImageId: undefined };
         }
       }
-      return msg;
+      return normalizedMessage;
     });
 
     // Count target results (selected images)
     const targetResultsCount = validatedMessages.filter(msg => 
-      msg.role === 'model' && msg.selectedImageId && msg.images?.some(img => 
-        img.id === msg.selectedImageId && img.status === 'success'
-      )
+      msg.role === 'model' && msg.selectedImageId &&
+      getSuccessfulImages(msg).some(img => img.id === msg.selectedImageId)
     ).length;
 
     const exportData = {
@@ -132,34 +143,37 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
       // Validate and restore target results (selected images)
       const restoredMessages = data.messages.map((msg: Message) => {
+        const successfulImages = getSuccessfulImages(msg);
+        const normalizedMessage = msg.role === 'model'
+          ? { ...msg, generationSlots: getMessageGenerationSlots(msg), images: undefined }
+          : msg;
         // For model messages, validate selectedImageId
-        if (msg.role === 'model' && msg.selectedImageId && msg.images) {
-          const selectedImage = msg.images.find((img: any) => img.id === msg.selectedImageId);
+        if (msg.role === 'model' && msg.selectedImageId) {
+          const selectedImage = successfulImages.find((img) => img.id === msg.selectedImageId);
           
           if (!selectedImage) {
             console.warn(`Message ${msg.id}: selectedImageId ${msg.selectedImageId} not found in images, clearing selection`);
-            return { ...msg, selectedImageId: undefined };
+            return { ...normalizedMessage, selectedImageId: undefined };
           }
           
           if (selectedImage.status !== 'success') {
             console.warn(`Message ${msg.id}: selected image has status ${selectedImage.status}, clearing selection`);
-            return { ...msg, selectedImageId: undefined };
+            return { ...normalizedMessage, selectedImageId: undefined };
           }
           
           // Ensure image data is valid
           if (!selectedImage.data || selectedImage.data.length === 0) {
             console.warn(`Message ${msg.id}: selected image has no data, clearing selection`);
-            return { ...msg, selectedImageId: undefined };
+            return { ...normalizedMessage, selectedImageId: undefined };
           }
         }
-        return msg;
+        return normalizedMessage;
       });
 
       // Count restored target results
       const restoredTargetResultsCount = restoredMessages.filter(msg => 
-        msg.role === 'model' && msg.selectedImageId && msg.images?.some(img => 
-          img.id === msg.selectedImageId && img.status === 'success'
-        )
+        msg.role === 'model' && msg.selectedImageId &&
+        getSuccessfulImages(msg).some(img => img.id === msg.selectedImageId)
       ).length;
 
       // Import messages
@@ -200,6 +214,23 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   };
 
   const isLight = theme === 'light';
+  const isGptImage2 =
+    providerConfig.provider === 'openai' &&
+    providerConfig.model?.toLowerCase().includes('gpt-image-2');
+  const aspectRatioOptions = isGptImage2
+    ? GPT_IMAGE_ASPECT_RATIO_OPTIONS
+    : ASPECT_RATIO_OPTIONS;
+
+  useEffect(() => {
+    if (
+      isGptImage2 &&
+      !GPT_IMAGE_ASPECT_RATIO_OPTIONS.some(
+        (option) => option.value === settings.aspectRatio
+      )
+    ) {
+      updateSettings({ aspectRatio: 'Auto' });
+    }
+  }, [isGptImage2, settings.aspectRatio, updateSettings]);
 
   const formatStorage = (bytes: number) => {
     if (bytes <= 0) return '0 B';
@@ -211,6 +242,12 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       unitIndex += 1;
     }
     return `${value.toFixed(value >= 100 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+  };
+
+  const formatStoragePercent = (ratio: number) => {
+    const percent = ratio * 100;
+    if (percent > 0 && percent < 1) return '<1%';
+    return `${Math.round(percent)}%`;
   };
 
   return (
@@ -257,7 +294,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
               : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
           }`}
         >
-          {ASPECT_RATIO_OPTIONS.map((option) => (
+          {aspectRatioOptions.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
@@ -281,7 +318,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         >
           <option value="1K">1K (Fast)</option>
           <option value="2K">2K (Pro)</option>
-          <option value="4K">4K (Pro)</option>
+          <option value="4K">4K (Experimental)</option>
         </select>
       </div>
 
@@ -338,9 +375,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {storageUsage && storageUsage.budgetBytes > 0 && (
         <div className={`flex items-center space-x-2 border-r pr-4 text-xs ${
           isLight ? 'border-gray-300 text-gray-600' : 'border-zinc-700 text-zinc-400'
-        }`} title="浏览器存储占用情况">
+        }`} title="应用图片缓存占用情况">
           <span>
-            缓存 {Math.round(storageUsage.usageRatio * 100)}%
+            缓存 {formatStoragePercent(storageUsage.usageRatio)}
           </span>
           <span>
             {formatStorage(storageUsage.usageBytes)} / {formatStorage(storageUsage.budgetBytes)}
@@ -348,43 +385,32 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
       )}
 
-      {onCleanupCache && (
-        <div className={`flex items-center border-r pr-4 ${
-          isLight ? 'border-gray-300' : 'border-zinc-700'
-        }`}>
-          <button
-            onClick={onCleanupCache}
-            className={`p-1.5 rounded transition-colors ${
-              isLight
-                ? 'text-amber-600 hover:text-amber-700 hover:bg-amber-50'
-                : 'text-amber-400 hover:text-amber-300 hover:bg-amber-900/20'
-            }`}
-            title="清理旧图片缓存"
-          >
-            <Trash2 size={16} />
-          </button>
-        </div>
-      )}
-
-      {/* Clear All Messages */}
-      {onClearAll && hasMessages && (
+      {onClearAllData && (
         <div className={`flex items-center border-r pr-4 ${
           isLight ? 'border-gray-300' : 'border-zinc-700'
         }`}>
           <button
             onClick={() => {
-              if (window.confirm('确定要清除所有对话历史吗？此操作不可撤销。')) {
-                onClearAll();
+              if (
+                window.confirm(
+                  '确定删除所有对话记录和图片缓存吗？此操作不可撤销，API 设置不会受到影响。'
+                )
+              ) {
+                void onClearAllData();
               }
             }}
-            className={`p-1.5 rounded transition-colors ${
+            disabled={isClearingData}
+            className={`p-1.5 rounded transition-colors disabled:cursor-wait disabled:opacity-50 ${
               isLight
                 ? 'text-red-600 hover:text-red-700 hover:bg-red-50'
                 : 'text-red-400 hover:text-red-300 hover:bg-red-900/20'
             }`}
-            title="清除所有对话历史"
+            title="清空全部对话和图片缓存"
+            aria-label="清空全部对话和图片缓存"
           >
-            <Trash2 size={16} />
+            {isClearingData
+              ? <Loader2 size={16} className="animate-spin" />
+              : <Trash2 size={16} />}
           </button>
         </div>
       )}

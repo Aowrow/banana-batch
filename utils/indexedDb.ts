@@ -1,4 +1,12 @@
-import type { Session, Message, GeneratedImage, UploadedImage } from '../types';
+import type {
+  Session,
+  Message,
+  GeneratedImage,
+  UploadedImage,
+  GenerationErrorInfo,
+  GenerationSlot
+} from '../types';
+import { getMessageGenerationSlots, getSuccessfulImages } from '../core/generationSlots';
 
 const DB_NAME = 'banana-batch-db';
 const DB_VERSION = 2;
@@ -33,7 +41,14 @@ type MessageRecord = {
   selectedImageId?: string;
   timestamp: number;
   isError?: boolean;
+  generationSlots?: GenerationSlotRecord[];
 };
+
+type GenerationSlotRecord =
+  | { slotId: string; index: number; status: 'pending'; attempts: number }
+  | { slotId: string; index: number; status: 'success'; attempts: number; imageId: string }
+  | { slotId: string; index: number; status: 'failed'; attempts: number; error: GenerationErrorInfo }
+  | { slotId: string; index: number; status: 'cancelled'; attempts: number; reason: string };
 
 type ImageRecord = {
   id: string;
@@ -48,6 +63,11 @@ type ImageRecord = {
   size: number;
   createdAt: number;
   lastAccessedAt: number;
+};
+
+export type ClearAllSessionDataResult = {
+  deletedImageCount: number;
+  deletedBytes: number;
 };
 
 type LegacySessionRecord = Session;
@@ -112,6 +132,28 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
+function sumImageRecordSizes(store: IDBObjectStore): Promise<ClearAllSessionDataResult> {
+  return new Promise((resolve, reject) => {
+    let deletedImageCount = 0;
+    let deletedBytes = 0;
+    const request = store.openCursor();
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve({ deletedImageCount, deletedBytes });
+        return;
+      }
+
+      const record = cursor.value as ImageRecord;
+      deletedImageCount += 1;
+      deletedBytes += Number.isFinite(record.size) ? record.size : 0;
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
 function dataUrlToBlob(dataUrl: string): Blob {
   const [meta, data] = dataUrl.split(',');
   if (!meta || !data) {
@@ -160,6 +202,44 @@ function toSessionRecord(session: Session): SessionRecord {
 }
 
 function toMessageRecord(sessionId: string, message: Message): MessageRecord {
+  const generationSlots = message.role === 'model'
+    ? getMessageGenerationSlots(message).map<GenerationSlotRecord>((slot) => {
+        if (slot.status === 'success') {
+          return {
+            slotId: slot.slotId,
+            index: slot.index,
+            status: 'success',
+            attempts: slot.attempts,
+            imageId: slot.image.id
+          };
+        }
+        if (slot.status === 'failed') {
+          return {
+            slotId: slot.slotId,
+            index: slot.index,
+            status: 'failed',
+            attempts: slot.attempts,
+            error: slot.error
+          };
+        }
+        if (slot.status === 'cancelled') {
+          return {
+            slotId: slot.slotId,
+            index: slot.index,
+            status: 'cancelled',
+            attempts: slot.attempts,
+            reason: slot.reason
+          };
+        }
+        return {
+          slotId: slot.slotId,
+          index: slot.index,
+          status: 'pending',
+          attempts: slot.attempts
+        };
+      })
+    : undefined;
+
   return {
     id: message.id,
     sessionId,
@@ -169,7 +249,8 @@ function toMessageRecord(sessionId: string, message: Message): MessageRecord {
     generationSettings: message.generationSettings,
     selectedImageId: message.selectedImageId,
     timestamp: message.timestamp,
-    isError: message.isError
+    isError: message.isError,
+    generationSlots
   };
 }
 
@@ -229,8 +310,7 @@ async function getImagesForSession(db: IDBDatabase, sessionId: string): Promise<
 
 async function persistSessionGraph(
   db: IDBDatabase,
-  session: Session,
-  protectedImageIds: Set<string>
+  session: Session
 ): Promise<void> {
   const existingMessages = await getMessagesForSession(db, session.id);
   const existingMessageIds = new Set(existingMessages.map((record) => record.id));
@@ -253,9 +333,7 @@ async function persistSessionGraph(
       messageStore.delete(staleMessageId);
       const staleImages = existingImagesByMessageId.get(staleMessageId) ?? [];
       for (const image of staleImages) {
-        if (!protectedImageIds.has(image.id)) {
-          imageStore.delete(image.id);
-        }
+        imageStore.delete(image.id);
       }
     }
   }
@@ -263,18 +341,19 @@ async function persistSessionGraph(
   for (const message of session.messages) {
     messageStore.put(toMessageRecord(session.id, message));
 
-    const nextImages = [...(message.images ?? []), ...(message.uploadedImages ?? [])];
+    const generatedImages = getSuccessfulImages(message);
+    const nextImages = [...generatedImages, ...(message.uploadedImages ?? [])];
     const nextImageIds = new Set(nextImages.map((image) => image.id));
 
     const existingImages = existingImagesByMessageId.get(message.id) ?? [];
 
     for (const staleImage of existingImages) {
-      if (!nextImageIds.has(staleImage.id) && !protectedImageIds.has(staleImage.id)) {
+      if (!nextImageIds.has(staleImage.id)) {
         imageStore.delete(staleImage.id);
       }
     }
 
-    for (const image of message.images ?? []) {
+    for (const image of generatedImages) {
       imageStore.put(
         createImageRecord(session.id, message.id, 'generated', image, message.timestamp, image.status)
       );
@@ -331,15 +410,68 @@ async function hydrateSession(db: IDBDatabase, sessionRecord: SessionRecord): Pr
       }
     }
 
+    let generationSlots: GenerationSlot[];
+    if (messageRecord.generationSlots) {
+      generationSlots = messageRecord.generationSlots
+        .map<GenerationSlot>((slot) => {
+          if (slot.status === 'success') {
+            const image = generatedImages.find((candidate) => candidate.id === slot.imageId);
+            if (image) return { ...slot, image };
+            return {
+              slotId: slot.slotId,
+              index: slot.index,
+              status: 'failed',
+              attempts: slot.attempts,
+              error: {
+                kind: 'unknown',
+                message: '图片缓存缺失，无法恢复该生成结果。',
+                attempts: slot.attempts,
+                retryable: true
+              }
+            };
+          }
+          if (slot.status === 'pending') {
+            return {
+              slotId: slot.slotId,
+              index: slot.index,
+              status: 'cancelled',
+              attempts: slot.attempts,
+              reason: '页面刷新导致生成任务中断。'
+            };
+          }
+          return slot;
+        })
+        .sort((left, right) => left.index - right.index);
+    } else {
+      generationSlots = generatedImages.map((image, index) =>
+        image.status === 'success'
+          ? { slotId: image.id, index, status: 'success', attempts: 1, image }
+          : {
+              slotId: image.id,
+              index,
+              status: 'failed',
+              attempts: 1,
+              error: {
+                kind: 'unknown',
+                message: '旧版本未保存该图片的失败原因。',
+                attempts: 1,
+                retryable: true
+              }
+            }
+      );
+    }
+
     const selectedImageExists =
-      !messageRecord.selectedImageId || generatedImages.some((image) => image.id === messageRecord.selectedImageId);
+      !messageRecord.selectedImageId || generationSlots.some(
+        (slot) => slot.status === 'success' && slot.image.id === messageRecord.selectedImageId
+      );
 
     messages.push({
       id: messageRecord.id,
       role: messageRecord.role,
       text: messageRecord.text,
       textVariations: messageRecord.textVariations,
-      images: generatedImages.length > 0 ? generatedImages : undefined,
+      generationSlots: generationSlots.length > 0 ? generationSlots : undefined,
       uploadedImages: uploadedImages.length > 0 ? uploadedImages : undefined,
       generationSettings: messageRecord.generationSettings,
       selectedImageId: selectedImageExists ? messageRecord.selectedImageId : undefined,
@@ -410,14 +542,8 @@ async function migrateLegacySessions(db: IDBDatabase): Promise<void> {
     return;
   }
 
-  const protectedImageIds = new Set<string>();
   for (const session of legacySessions) {
-    for (const message of session.messages) {
-      if (message.selectedImageId) {
-        protectedImageIds.add(message.selectedImageId);
-      }
-    }
-    await persistSessionGraph(db, session, protectedImageIds);
+    await persistSessionGraph(db, session);
   }
 
   await setMetaValue('schemaV2Migrated', true);
@@ -442,13 +568,7 @@ export async function getAllSessions(): Promise<Session[]> {
 export async function putSession(session: Session): Promise<void> {
   const db = await openDb();
   try {
-    const protectedImageIds = new Set<string>();
-    for (const message of session.messages) {
-      if (message.selectedImageId) {
-        protectedImageIds.add(message.selectedImageId);
-      }
-    }
-    await persistSessionGraph(db, session, protectedImageIds);
+    await persistSessionGraph(db, session);
   } finally {
     db.close();
   }
@@ -457,7 +577,6 @@ export async function putSession(session: Session): Promise<void> {
 export async function deleteSessionById(sessionId: string): Promise<void> {
   const db = await openDb();
   try {
-    const protectedImageIds = await getProtectedImageIds(db);
     const messageRecords = await getMessagesForSession(db, sessionId);
     const imageRecords = await getImagesForSession(db, sessionId);
     const tx = db.transaction([STORE_SESSIONS, STORE_MESSAGES, STORE_IMAGES], 'readwrite');
@@ -470,13 +589,41 @@ export async function deleteSessionById(sessionId: string): Promise<void> {
     }
 
     for (const image of imageRecords) {
-      if (!protectedImageIds.has(image.id)) {
-        imageStore.delete(image.id);
-      }
+      imageStore.delete(image.id);
     }
 
     sessionStore.delete(sessionId);
     await transactionDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
+export async function clearAllSessionData(
+  emptySession: Session
+): Promise<ClearAllSessionDataResult> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(
+      [STORE_SESSIONS, STORE_MESSAGES, STORE_IMAGES, STORE_META],
+      'readwrite'
+    );
+    const sessionStore = tx.objectStore(STORE_SESSIONS);
+    const messageStore = tx.objectStore(STORE_MESSAGES);
+    const imageStore = tx.objectStore(STORE_IMAGES);
+    const metaStore = tx.objectStore(STORE_META);
+    const deleted = await sumImageRecordSizes(imageStore);
+
+    sessionStore.clear();
+    messageStore.clear();
+    imageStore.clear();
+    metaStore.clear();
+    sessionStore.put(toSessionRecord(emptySession));
+    metaStore.put({ key: 'currentSessionId', value: emptySession.id } as MetaRecord);
+    metaStore.put({ key: 'schemaV2Migrated', value: true } as MetaRecord);
+
+    await transactionDone(tx);
+    return deleted;
   } finally {
     db.close();
   }
@@ -552,10 +699,22 @@ export type AppStorageEstimate = {
 };
 
 async function estimateUsage(): Promise<AppStorageEstimate> {
-  const browserEstimate = navigator.storage?.estimate
-    ? await navigator.storage.estimate()
-    : undefined;
-  const usageBytes = browserEstimate?.usage ?? 0;
+  const browserEstimatePromise = navigator.storage?.estimate
+    ? navigator.storage.estimate()
+    : Promise.resolve(undefined);
+  const db = await openDb();
+  let usageBytes = 0;
+
+  try {
+    const tx = db.transaction(STORE_IMAGES, 'readonly');
+    const imageUsage = await sumImageRecordSizes(tx.objectStore(STORE_IMAGES));
+    await transactionDone(tx);
+    usageBytes = imageUsage.deletedBytes;
+  } finally {
+    db.close();
+  }
+
+  const browserEstimate = await browserEstimatePromise;
   const browserQuotaBytes = browserEstimate?.quota ?? 0;
   const budgetBytes = APP_CACHE_BUDGET_BYTES;
   const usageRatio = budgetBytes > 0 ? usageBytes / budgetBytes : 0;
